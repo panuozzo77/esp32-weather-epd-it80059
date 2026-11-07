@@ -26,6 +26,8 @@
 #include <SPI.h>
 #include <time.h>
 #include <WiFi.h>
+#include <lwip/dns.h>
+#include <lwip/ip_addr.h>
 
 // additional libraries
 #include <Adafruit_BusIO_Register.h>
@@ -77,7 +79,13 @@ wl_status_t startWiFi(int &wifiRSSI)
   {
     wifiRSSI = WiFi.RSSI(); // get WiFi signal strength now, because the WiFi
                             // will be turned off to save power!
-    Serial.println("IP: " + WiFi.localIP().toString());
+    Serial.println("IP: " + WiFi.localIP().toString() + " Gateway: " + WiFi.gatewayIP().toString());
+    // Configure public DNS (Cloudflare & Google) via lwIP without resetting DHCP routing
+    ip_addr_t dns1, dns2;
+    IP_ADDR4(&dns1, 1, 1, 1, 1);
+    IP_ADDR4(&dns2, 8, 8, 8, 8);
+    dns_setserver(0, &dns1);
+    dns_setserver(1, &dns2);
   }
   else
   {

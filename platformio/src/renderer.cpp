@@ -15,6 +15,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <cmath>
 #include "_locale.h"
 #include "_strftime.h"
 #include "renderer.h"
@@ -87,7 +88,7 @@
 //   DISP_3C_E420 (4.2in): 2 cols × 5 rows, icon=24×24, col=75px, base_y=104
 //   others       (7.5in): 2 cols × 5 rows, icon=48×48, col=162px, base_y=204
 #ifdef DISP_3C_E420
-  static const int WI_COL  = 75;   // column width (px) — keeps right column
+  static const int WI_COL  = 84;   // column width (px) — keeps right column
                                    // clear of the outlook graph's y-axis labels
   static const int WI_Y0   = 104;  // first-row base y
   static const int WI_DY   = 30;   // row stride (icon 24 + gap 6)
@@ -2132,4 +2133,587 @@ void drawError(const uint8_t *bitmap,
                              bitmap, iconSize, iconSize, ACCENT_COLOR);
   return;
 } // end drawError
+
+/* =========================================================================
+ * MULTI-SCREEN IMPLEMENTATION (400x300 E-PAPER)
+ * Screen 0: Realtime Microclimate & Today's Weather Outlook
+ * Screen 1: Historical Summary (Past 4 Days + Today from SD) & 24h Trend
+ * Screen 2: Nautical & Wind Special (Lega Navale Torre del Greco)
+ * ========================================================================= */
+
+// Bottom Page Dots Indicator
+void drawPageIndicator(uint8_t page)
+{
+  display.setFont(&FONT_6pt8b);
+  int startX = 8;
+  int startY = DISP_HEIGHT - 6;
+
+  // Draw 3 dots
+  for (int i = 0; i < 3; ++i)
+  {
+    if (i == page)
+    {
+      display.fillCircle(startX + (i * 12), startY - 3, 3, GxEPD_BLACK);
+    }
+    else
+    {
+      display.drawCircle(startX + (i * 12), startY - 3, 3, GxEPD_BLACK);
+    }
+  }
+
+  char pageBuf[32];
+  snprintf(pageBuf, sizeof(pageBuf), "P%d/3 [BOOT: cambio]", page + 1);
+  drawString(startX + 40, startY, pageBuf, LEFT, GxEPD_BLACK);
+}
+
+// Bottom Status Bar
+void drawCustomStatusBar(const weather_bundle_t &bundle, const tm &timeInfo)
+{
+  display.setFont(&FONT_6pt8b);
+  int curX = DISP_WIDTH - 8;
+  int curY = DISP_HEIGHT - 6;
+
+  // Battery status
+  if (bundle.battery_mv > 0)
+  {
+    uint32_t batPct = calcBatPercent(bundle.battery_mv, MIN_BATTERY_VOLTAGE, MAX_BATTERY_VOLTAGE);
+    char batBuf[16];
+    snprintf(batBuf, sizeof(batBuf), "%d%%", batPct);
+    drawString(curX, curY, batBuf, RIGHT, GxEPD_BLACK);
+    curX -= getStringWidth(batBuf) + 4;
+    display.drawInvertedBitmap(curX - 16, DISP_HEIGHT - 17, getBatBitmap24(batPct), 24, 24, GxEPD_BLACK);
+    curX -= 22;
+  }
+
+  // WiFi / Offline indicator
+  if (bundle.is_offline)
+  {
+    char offBuf[32];
+    tm syncTm;
+    localtime_r(&bundle.last_sync_epoch, &syncTm);
+    snprintf(offBuf, sizeof(offBuf), "OFFLINE (%02d:%02d)", syncTm.tm_hour, syncTm.tm_min);
+    drawString(curX, curY, offBuf, RIGHT, GxEPD_RED);
+    curX -= getStringWidth(offBuf) + 4;
+    display.drawInvertedBitmap(curX - 16, DISP_HEIGHT - 15, error_icon_24x24, 24, 24, GxEPD_RED);
+  }
+  else
+  {
+    char syncBuf[24];
+    snprintf(syncBuf, sizeof(syncBuf), "Sync %02d:%02d", timeInfo.tm_hour, timeInfo.tm_min);
+    drawString(curX, curY, syncBuf, RIGHT, GxEPD_BLACK);
+    curX -= getStringWidth(syncBuf) + 4;
+    display.drawInvertedBitmap(curX - 16, DISP_HEIGHT - 14, getWiFiBitmap16(bundle.wifi_rssi), 16, 16, GxEPD_BLACK);
+  }
+
+  // Horizontal line separating content from status bar
+  display.drawLine(4, DISP_HEIGHT - 22, DISP_WIDTH - 4, DISP_HEIGHT - 22, GxEPD_BLACK);
+}
+
+// Screen 0: Realtime Microclimate & Today's Weather Outlook
+void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo)
+{
+  // 1. Header
+  display.setFont(&FONT_9pt8b);
+  drawString(8, 16, "TORRE DEL GRECO", LEFT, GxEPD_RED);
+  display.setFont(&FONT_6pt8b);
+  drawString(8, 28, "Microclima & Meteo Odierno", LEFT, GxEPD_BLACK);
+
+  char dateStr[32];
+  static const char* dayNamesFull[] = {"Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"};
+  static const char* monNamesFull[] = {"Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"};
+  snprintf(dateStr, sizeof(dateStr), "%s %d %s %02d:%02d",
+           dayNamesFull[timeInfo.tm_wday % 7], timeInfo.tm_mday, monNamesFull[timeInfo.tm_mon % 12],
+           timeInfo.tm_hour, timeInfo.tm_min);
+  drawString(DISP_WIDTH - 8, 20, dateStr, RIGHT, GxEPD_BLACK);
+  display.drawLine(6, 33, DISP_WIDTH - 6, 33, GxEPD_BLACK);
+
+  // 2. Left Column: Realtime Microclimate (X = 6 to 196)
+  display.setFont(&FONT_6pt8b);
+  drawString(8, 44, "RILEVAMENTI TEMPO REALE", LEFT, GxEPD_RED);
+
+  // Card 1: Casa (AHT20)
+  display.drawRoundRect(6, 49, 188, 68, 3, GxEPD_BLACK);
+  display.drawInvertedBitmap(10, 53, house_thermometer_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(38, 64, "CASA (Interno AHT20)", LEFT, GxEPD_BLACK);
+
+  if (bundle.indoor.valid && !std::isnan(bundle.indoor.temp))
+  {
+    display.setFont(&FONT_16pt8b);
+    char inT[16];
+    snprintf(inT, sizeof(inT), "%.1f\260C", bundle.indoor.temp);
+    drawString(38, 88, inT, LEFT, GxEPD_BLACK);
+
+    display.setFont(&FONT_6pt8b);
+    char inH[24];
+    snprintf(inH, sizeof(inH), "Umidita': %.0f %%", bundle.indoor.humidity);
+    drawString(38, 106, inH, LEFT, GxEPD_BLACK);
+  }
+  else
+  {
+    display.setFont(&FONT_11pt8b);
+    drawString(38, 85, "--.-\260C (No sensore)", LEFT, GxEPD_BLACK);
+  }
+
+  // Card 2: Collina 154m (Campania Live)
+  display.drawRoundRect(6, 122, 188, 72, 3, GxEPD_BLACK);
+  display.drawInvertedBitmap(10, 126, wi_thermometer_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(38, 137, "COLLINA (154m slm)", LEFT, GxEPD_RED);
+
+  if (bundle.hill.valid && !std::isnan(bundle.hill.temp))
+  {
+    display.setFont(&FONT_16pt8b);
+    char hT[16];
+    snprintf(hT, sizeof(hT), "%.1f\260C", bundle.hill.temp);
+    drawString(38, 161, hT, LEFT, GxEPD_RED);
+
+    display.setFont(&FONT_5pt8b);
+    char hSub[40];
+    snprintf(hSub, sizeof(hSub), "Umid. %d%% | %d hPa",
+             bundle.hill.humidity, (int)std::round(bundle.hill.pressure));
+    drawString(38, 178, hSub, LEFT, GxEPD_BLACK);
+
+    char hWind[40];
+    snprintf(hWind, sizeof(hWind), "Vento: %.1f kts %s",
+             bundle.hill.wind_kts, bundle.hill.wind_dir);
+    drawString(38, 189, hWind, LEFT, GxEPD_BLACK);
+  }
+  else
+  {
+    display.setFont(&FONT_11pt8b);
+    drawString(38, 160, "--.-\260C (In attesa)", LEFT, GxEPD_BLACK);
+  }
+
+  // Card 3: Porto (Lega Navale)
+  display.drawRoundRect(6, 199, 188, 72, 3, GxEPD_BLACK);
+  display.drawInvertedBitmap(10, 203, wi_strong_wind_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(38, 214, "PORTO (Pontile)", LEFT, GxEPD_BLACK);
+
+  if (bundle.port.valid && !std::isnan(bundle.port.temp))
+  {
+    display.setFont(&FONT_16pt8b);
+    char pT[16];
+    snprintf(pT, sizeof(pT), "%.1f\260C", bundle.port.temp);
+    drawString(38, 238, pT, LEFT, GxEPD_BLACK);
+
+    display.setFont(&FONT_5pt8b);
+    char pSub[40];
+    snprintf(pSub, sizeof(pSub), "Umid. %d%% | Pioggia: %.1f mm",
+             bundle.port.humidity, bundle.port.rain_today);
+    drawString(38, 255, pSub, LEFT, GxEPD_BLACK);
+
+    char pWind[40];
+    snprintf(pWind, sizeof(pWind), "Vento: %.1f kts (Raff. %.1f)",
+             bundle.port.wind_kts, bundle.port.wind_gust_kts);
+    drawString(38, 266, pWind, LEFT, GxEPD_BLACK);
+  }
+  else
+  {
+    display.setFont(&FONT_11pt8b);
+    drawString(38, 237, "--.-\260C (In attesa)", LEFT, GxEPD_BLACK);
+  }
+
+  // Vertical Divider
+  display.drawLine(198, 38, 198, 273, GxEPD_BLACK);
+
+  // 3. Right Column: Today's Weather Focus (X = 202 to 394)
+  display.setFont(&FONT_6pt8b);
+  drawString(204, 44, "METEO & PREVISIONE OGGI", LEFT, GxEPD_RED);
+
+  display.drawRoundRect(202, 49, 192, 222, 3, GxEPD_BLACK);
+
+  // Condition icon + text
+  display.drawInvertedBitmap(208, 55, wi_day_sunny_48x48, 48, 48, GxEPD_BLACK);
+  display.setFont(&FONT_8pt8b);
+  drawString(262, 70, bundle.today.valid ? bundle.today.condition : "Oggi", LEFT, GxEPD_BLACK);
+
+  display.setFont(&FONT_6pt8b);
+  drawString(262, 85, "Previsione giornata", LEFT, GxEPD_RED);
+
+  display.drawLine(206, 108, 390, 108, GxEPD_BLACK);
+
+  // Escursione termica prevista per oggi
+  display.setFont(&FONT_7pt8b);
+  drawString(210, 124, "Temperature Previste:", LEFT, GxEPD_BLACK);
+  display.setFont(&FONT_9pt8b);
+  char tSpan[32];
+  if (!std::isnan(bundle.today.temp_min) && !std::isnan(bundle.today.temp_max))
+  {
+    snprintf(tSpan, sizeof(tSpan), "Min %.1f\260  |  Max %.1f\260",
+             bundle.today.temp_min, bundle.today.temp_max);
+  }
+  else
+  {
+    snprintf(tSpan, sizeof(tSpan), "Min 14\260  |  Max 21\260");
+  }
+  drawString(210, 142, tSpan, LEFT, GxEPD_BLACK);
+
+  display.drawLine(206, 150, 390, 150, GxEPD_BLACK);
+
+  // Probabilita pioggia e accumulo
+  display.drawInvertedBitmap(208, 154, wi_raindrops_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(238, 166, "Probab. Pioggia:", LEFT, GxEPD_BLACK);
+  char popBuf[24];
+  snprintf(popBuf, sizeof(popBuf), "%.0f %%  (%.1f mm)", bundle.today.pop, bundle.today.rain_mm);
+  display.setFont(&FONT_7pt8b);
+  drawString(238, 180, popBuf, LEFT, bundle.today.pop > 40.0f ? GxEPD_RED : GxEPD_BLACK);
+
+  // Vento previsto
+  display.drawInvertedBitmap(208, 186, wi_strong_wind_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(238, 198, "Raffica massima:", LEFT, GxEPD_BLACK);
+  char wBuf[24];
+  snprintf(wBuf, sizeof(wBuf), "fino a %.1f nodi",
+           std::max(bundle.today.wind_max_kts, std::max(bundle.port.wind_gust_kts, bundle.hill.wind_gust_kts)));
+  display.setFont(&FONT_7pt8b);
+  drawString(238, 212, wBuf, LEFT, GxEPD_BLACK);
+
+  display.drawLine(206, 222, 390, 222, GxEPD_BLACK);
+
+  // Alba / Tramonto
+  display.drawInvertedBitmap(208, 226, wi_sunrise_24x24, 24, 24, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  char sunR[16] = "--:--";
+  char sunS[16] = "--:--";
+  if (bundle.today.sunrise > 0)
+  {
+    time_t sr = bundle.today.sunrise;
+    tm srTm;
+    localtime_r(&sr, &srTm);
+    snprintf(sunR, sizeof(sunR), "%02d:%02d", srTm.tm_hour, srTm.tm_min);
+  }
+  if (bundle.today.sunset > 0)
+  {
+    time_t ss = bundle.today.sunset;
+    tm ssTm;
+    localtime_r(&ss, &ssTm);
+    snprintf(sunS, sizeof(sunS), "%02d:%02d", ssTm.tm_hour, ssTm.tm_min);
+  }
+  char astroBuf[40];
+  snprintf(astroBuf, sizeof(astroBuf), "Alba: %s", sunR);
+  drawString(236, 239, astroBuf, LEFT, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(208, 246, wi_sunset_24x24, 24, 24, GxEPD_BLACK);
+  snprintf(astroBuf, sizeof(astroBuf), "Tramonto: %s", sunS);
+  drawString(236, 259, astroBuf, LEFT, GxEPD_RED);
+}
+
+// Screen 1: Historical Summary (Past 4 Days + Today from SD) & 24h Trend
+void drawScreen1_History(const weather_bundle_t &bundle, const tm &timeInfo)
+{
+  // 1. Header
+  display.setFont(&FONT_9pt8b);
+  drawString(8, 16, "STORICO METEO & TREND 24H", LEFT, GxEPD_RED);
+  display.setFont(&FONT_6pt8b);
+  drawString(8, 28, "Dati aggregati da scheda SD", LEFT, GxEPD_BLACK);
+  drawString(DISP_WIDTH - 8, 24, "Torre del Greco", RIGHT, GxEPD_BLACK);
+  display.drawLine(6, 33, DISP_WIDTH - 6, 33, GxEPD_BLACK);
+
+  // 2. Table: Past Days Summary (Y = 38 to 142)
+  display.drawRect(6, 37, 388, 18, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(12, 49, "Giorno", LEFT, GxEPD_BLACK);
+  drawString(110, 49, "T. Min", CENTER, GxEPD_BLACK);
+  drawString(180, 49, "T. Max", CENTER, GxEPD_BLACK);
+  drawString(260, 49, "Pioggia", CENTER, GxEPD_BLACK);
+  drawString(345, 49, "Raffica Max", CENTER, GxEPD_BLACK);
+
+  int rowY = 58;
+  for (int i = 0; i < 5; ++i)
+  {
+    display.setFont(&FONT_6pt8b);
+    char dayLabel[24];
+    if (i == 0) snprintf(dayLabel, sizeof(dayLabel), "Oggi (%s)", bundle.history[i].date_str);
+    else if (i == 1) snprintf(dayLabel, sizeof(dayLabel), "Ieri (%s)", bundle.history[i].date_str);
+    else snprintf(dayLabel, sizeof(dayLabel), "%s %s", bundle.history[i].day_name, bundle.history[i].date_str);
+
+    drawString(12, rowY + 12, dayLabel, LEFT, (i == 0) ? GxEPD_RED : GxEPD_BLACK);
+
+    if (bundle.history[i].has_data && !std::isnan(bundle.history[i].temp_min))
+    {
+      char minBuf[16], maxBuf[16], rainBuf[16], windBuf[16];
+      snprintf(minBuf, sizeof(minBuf), "%.1f\260C", bundle.history[i].temp_min);
+      snprintf(maxBuf, sizeof(maxBuf), "%.1f\260C", bundle.history[i].temp_max);
+      snprintf(rainBuf, sizeof(rainBuf), "%.1f mm", bundle.history[i].rain_total);
+      snprintf(windBuf, sizeof(windBuf), "%.0f kts", bundle.history[i].wind_max_kts);
+
+      drawString(110, rowY + 12, minBuf, CENTER, GxEPD_RED);
+      drawString(180, rowY + 12, maxBuf, CENTER, GxEPD_BLACK);
+      drawString(260, rowY + 12, rainBuf, CENTER, bundle.history[i].rain_total > 0.0f ? GxEPD_RED : GxEPD_BLACK);
+      drawString(345, rowY + 12, windBuf, CENTER, GxEPD_BLACK);
+    }
+    else
+    {
+      drawString(110, rowY + 12, "--", CENTER, GxEPD_BLACK);
+      drawString(180, rowY + 12, "--", CENTER, GxEPD_BLACK);
+      drawString(260, rowY + 12, "--", CENTER, GxEPD_BLACK);
+      drawString(345, rowY + 12, "--", CENTER, GxEPD_BLACK);
+    }
+
+    display.drawLine(6, rowY + 17, 394, rowY + 17, GxEPD_BLACK);
+    rowY += 17;
+  }
+
+  // 3. 24h Trend Chart (Y = 146 to 270)
+  display.setFont(&FONT_6pt8b);
+  drawString(8, 154, "Curva Temp. 24h:", LEFT, GxEPD_BLACK);
+  drawString(125, 154, "- Porto", LEFT, GxEPD_BLACK);
+  drawString(195, 154, "- Collina", LEFT, GxEPD_RED);
+  drawString(275, 154, "-- Casa", LEFT, GxEPD_BLACK);
+
+  const int graphX0 = 36;
+  const int graphX1 = 390;
+  const int graphY0 = 164;
+  const int graphY1 = 265;
+
+  display.drawLine(graphX0, graphY1, graphX1, graphY1, GxEPD_BLACK);
+  display.drawLine(graphX0, graphY0, graphX0, graphY1, GxEPD_BLACK);
+
+  // Scan min & max of trend points
+  float gMin = 999.0f;
+  float gMax = -999.0f;
+  for (int i = 0; i < bundle.trend_count; ++i)
+  {
+    if (!std::isnan(bundle.trend_24h[i].port_temp))
+    {
+      gMin = std::min(gMin, bundle.trend_24h[i].port_temp);
+      gMax = std::max(gMax, bundle.trend_24h[i].port_temp);
+    }
+    if (!std::isnan(bundle.trend_24h[i].hill_temp))
+    {
+      gMin = std::min(gMin, bundle.trend_24h[i].hill_temp);
+      gMax = std::max(gMax, bundle.trend_24h[i].hill_temp);
+    }
+  }
+
+  if (gMin > 900.0f) { gMin = 14.0f; gMax = 24.0f; }
+  gMin = std::floor(gMin - 1.0f);
+  gMax = std::ceil(gMax + 1.0f);
+  if (gMax <= gMin) gMax = gMin + 5.0f;
+
+  // Y-axis labels and grid lines
+  display.setFont(&FONT_5pt8b);
+  char minLbl[12], maxLbl[12], midLbl[12];
+  snprintf(maxLbl, sizeof(maxLbl), "%.0f\260", gMax);
+  snprintf(minLbl, sizeof(minLbl), "%.0f\260", gMin);
+  snprintf(midLbl, sizeof(midLbl), "%.0f\260", (gMin + gMax) / 2.0f);
+  drawString(graphX0 - 4, graphY0 + 4, maxLbl, RIGHT, GxEPD_BLACK);
+  drawString(graphX0 - 4, (graphY0 + graphY1) / 2 + 3, midLbl, RIGHT, GxEPD_BLACK);
+  drawString(graphX0 - 4, graphY1, minLbl, RIGHT, GxEPD_BLACK);
+
+  // Dotted mid line
+  int midY = (graphY0 + graphY1) / 2;
+  for (int x = graphX0; x < graphX1; x += 4)
+  {
+    display.drawPixel(x, midY, GxEPD_BLACK);
+  }
+
+  // Plot samples
+  if (bundle.trend_count > 1)
+  {
+    float xStep = (float)(graphX1 - graphX0) / (float)(bundle.trend_count - 1);
+    for (int i = 0; i < bundle.trend_count - 1; ++i)
+    {
+      int xA = (int)(graphX0 + i * xStep);
+      int xB = (int)(graphX0 + (i + 1) * xStep);
+
+      // 1. Port temp (Black)
+      if (!std::isnan(bundle.trend_24h[i].port_temp) && !std::isnan(bundle.trend_24h[i + 1].port_temp))
+      {
+        int yA = graphY1 - (int)(((bundle.trend_24h[i].port_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].port_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        display.drawLine(xA, yA, xB, yB, GxEPD_BLACK);
+        display.drawLine(xA, yA + 1, xB, yB + 1, GxEPD_BLACK);
+      }
+
+      // 2. Hill temp (Red)
+      if (!std::isnan(bundle.trend_24h[i].hill_temp) && !std::isnan(bundle.trend_24h[i + 1].hill_temp))
+      {
+        int yA = graphY1 - (int)(((bundle.trend_24h[i].hill_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].hill_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        display.drawLine(xA, yA, xB, yB, GxEPD_RED);
+        display.drawLine(xA, yA + 1, xB, yB + 1, GxEPD_RED);
+      }
+
+      // 3. Indoor temp (Dotted black)
+      if (!std::isnan(bundle.trend_24h[i].indoor_temp) && !std::isnan(bundle.trend_24h[i + 1].indoor_temp))
+      {
+        int yA = graphY1 - (int)(((bundle.trend_24h[i].indoor_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].indoor_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
+        display.drawPixel(xA, yA, GxEPD_BLACK);
+        display.drawPixel((xA + xB) / 2, (yA + yB) / 2, GxEPD_BLACK);
+      }
+    }
+  }
+  else
+  {
+    display.setFont(&FONT_7pt8b);
+    drawString((graphX0 + graphX1) / 2, (graphY0 + graphY1) / 2,
+               "Registrazione trend in corso...", CENTER, GxEPD_BLACK);
+  }
+}
+
+// Screen 2: Nautical & Wind Special (Lega Navale Torre del Greco)
+void drawScreen2_Nautical(const weather_bundle_t &bundle, const tm &timeInfo)
+{
+  // 1. Header
+  display.setFont(&FONT_9pt8b);
+  drawString(8, 16, "LEGA NAVALE ITALIANA", LEFT, GxEPD_RED);
+  display.setFont(&FONT_6pt8b);
+  drawString(8, 28, "Sezione Torre del Greco - Stazione Pontile", LEFT, GxEPD_BLACK);
+  drawString(DISP_WIDTH - 8, 24, "40\26047'N 14\26021'E", RIGHT, GxEPD_BLACK);
+  display.drawLine(6, 33, DISP_WIDTH - 6, 33, GxEPD_BLACK);
+
+  // 2. Left: Graphic Compass Rose (Wind Rose)
+  const int cX = 100;
+  const int cY = 146;
+  const int r  = 54;
+
+  // Circles
+  display.drawCircle(cX, cY, r, GxEPD_BLACK);
+  display.drawCircle(cX, cY, r - 4, GxEPD_BLACK);
+  display.fillCircle(cX, cY, 3, GxEPD_BLACK);
+
+  // Cardinal marks
+  display.setFont(&FONT_7pt8b);
+  drawString(cX, cY - r - 3, "N", CENTER, GxEPD_RED);
+  drawString(cX + r + 6, cY + 4, "E", CENTER, GxEPD_BLACK);
+  drawString(cX, cY + r + 11, "S", CENTER, GxEPD_BLACK);
+  drawString(cX - r - 6, cY + 4, "W", CENTER, GxEPD_BLACK);
+
+  // Minor ticks (NE, SE, SW, NW)
+  float diag = r * 0.7071f;
+  display.drawLine(cX + (int)(diag * 0.85f), cY - (int)(diag * 0.85f), cX + (int)diag, cY - (int)diag, GxEPD_BLACK);
+  display.drawLine(cX + (int)(diag * 0.85f), cY + (int)(diag * 0.85f), cX + (int)diag, cY + (int)diag, GxEPD_BLACK);
+  display.drawLine(cX - (int)(diag * 0.85f), cY + (int)(diag * 0.85f), cX - (int)diag, cY + (int)diag, GxEPD_BLACK);
+  display.drawLine(cX - (int)(diag * 0.85f), cY - (int)(diag * 0.85f), cX - (int)diag, cY - (int)diag, GxEPD_BLACK);
+
+  // Wind direction needle
+  int deg = bundle.port.wind_deg;
+  if (deg == 0 && bundle.hill.wind_deg > 0) deg = bundle.hill.wind_deg;
+  float rad = deg * (M_PI / 180.0f);
+
+  int tipX = cX + (int)(sin(rad) * (r - 7));
+  int tipY = cY - (int)(cos(rad) * (r - 7));
+  int tailX = cX - (int)(sin(rad) * (r / 3));
+  int tailY = cY + (int)(cos(rad) * (r / 3));
+
+  // Red pointer arrow
+  float perpRad = rad + (M_PI / 2.0f);
+  int wA_X = cX + (int)(sin(perpRad) * 6);
+  int wA_Y = cY - (int)(cos(perpRad) * 6);
+  int wB_X = cX - (int)(sin(perpRad) * 6);
+  int wB_Y = cY + (int)(cos(perpRad) * 6);
+
+  display.fillTriangle(tipX, tipY, wA_X, wA_Y, wB_X, wB_Y, GxEPD_RED);
+  display.drawLine(cX, cY, tailX, tailY, GxEPD_BLACK);
+
+  // Direction label box below compass
+  display.drawRoundRect(20, 222, 160, 44, 3, GxEPD_BLACK);
+  display.setFont(&FONT_8pt8b);
+  char dirBuf[32];
+  snprintf(dirBuf, sizeof(dirBuf), "DIREZ: %s (%d\260)", bundle.port.wind_dir, deg);
+  drawString(100, 238, dirBuf, CENTER, GxEPD_RED);
+
+  display.setFont(&FONT_6pt8b);
+  char windBeaufort[32];
+  snprintf(windBeaufort, sizeof(windBeaufort), "Forza %d Beaufort", meterspersecond_to_beaufort(knots_to_meterspersecond(bundle.port.wind_kts)));
+  drawString(100, 256, windBeaufort, CENTER, GxEPD_BLACK);
+
+  // Vertical line
+  display.drawLine(198, 38, 198, 273, GxEPD_BLACK);
+
+  // 3. Right: Nautical Indicators (X = 204 to 395)
+  // Card 1: Wind speed
+  display.drawRoundRect(204, 38, 190, 72, 3, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  drawString(212, 52, "VELOCITA' VENTO", LEFT, GxEPD_BLACK);
+
+  display.setFont(&FONT_24pt8b);
+  char ktsBuf[16];
+  snprintf(ktsBuf, sizeof(ktsBuf), "%.1f", bundle.port.wind_kts);
+  drawString(212, 88, ktsBuf, LEFT, GxEPD_BLACK);
+
+  display.setFont(&FONT_8pt8b);
+  drawString(display.getCursorX() + 6, 75, "NODI", LEFT, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  char kmhBuf[16];
+  snprintf(kmhBuf, sizeof(kmhBuf), "%.1f km/h", knots_to_kilometersperhour(bundle.port.wind_kts));
+  drawString(display.getCursorX() + 6, 92, kmhBuf, LEFT, GxEPD_BLACK);
+
+  // Card 2: Gust (Red)
+  display.drawRoundRect(204, 114, 190, 36, 3, GxEPD_BLACK);
+  display.setFont(&FONT_7pt8b);
+  char gustBuf[32];
+  snprintf(gustBuf, sizeof(gustBuf), "RAFFA: %.1f kts", bundle.port.wind_gust_kts);
+  drawString(212, 137, gustBuf, LEFT, GxEPD_RED);
+
+  display.setFont(&FONT_6pt8b);
+  char gustKmh[24];
+  snprintf(gustKmh, sizeof(gustKmh), "(%.1f km/h)", knots_to_kilometersperhour(bundle.port.wind_gust_kts));
+  drawString(384, 137, gustKmh, RIGHT, GxEPD_BLACK);
+
+  // Card 3: Other parameters
+  display.drawRoundRect(204, 154, 190, 116, 3, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 160, wi_thermometer_16x16, 16, 16, GxEPD_BLACK);
+  display.setFont(&FONT_6pt8b);
+  char pTBuf[32];
+  snprintf(pTBuf, sizeof(pTBuf), "Temp. Pontile: %.1f\260C", bundle.port.temp);
+  drawString(232, 172, pTBuf, LEFT, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 178, wi_humidity_16x16, 16, 16, GxEPD_BLACK);
+  char pHBuf[32];
+  snprintf(pHBuf, sizeof(pHBuf), "Umidita' Pontile: %d %%", bundle.port.humidity);
+  drawString(232, 190, pHBuf, LEFT, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 196, wi_barometer_16x16, 16, 16, GxEPD_BLACK);
+  char pPBuf[32];
+  snprintf(pPBuf, sizeof(pPBuf), "Pressione: %.1f hPa", bundle.port.pressure > 800.0f ? bundle.port.pressure : bundle.hill.pressure);
+  drawString(232, 208, pPBuf, LEFT, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 214, wi_day_sunny_16x16, 16, 16, GxEPD_BLACK);
+  char pSBuf[32];
+  snprintf(pSBuf, sizeof(pSBuf), "Radiazione: %.0f W/m\262", bundle.port.solar_wm2);
+  drawString(232, 226, pSBuf, LEFT, GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 232, air_filter_16x16, 16, 16, GxEPD_BLACK);
+  char pUBuf[32];
+  snprintf(pUBuf, sizeof(pUBuf), "Indice UV: %d (%s)", bundle.port.uv_index, getUVIdesc(bundle.port.uv_index));
+  drawString(232, 244, pUBuf, LEFT, bundle.port.uv_index > 5 ? GxEPD_RED : GxEPD_BLACK);
+
+  display.drawInvertedBitmap(210, 250, wi_raindrops_16x16, 16, 16, GxEPD_BLACK);
+  char pRBuf[32];
+  snprintf(pRBuf, sizeof(pRBuf), "Pioggia accumulata: %.1f mm", bundle.port.rain_today);
+  drawString(232, 262, pRBuf, LEFT, GxEPD_BLACK);
+}
+
+// Master rendering function for paged drawing loop
+void renderWeatherBundle(const weather_bundle_t &bundle, const tm &timeInfo)
+{
+  initDisplay();
+  do
+  {
+    if (bundle.current_page == 0)
+    {
+      drawScreen0_Dashboard(bundle, timeInfo);
+    }
+    else if (bundle.current_page == 1)
+    {
+      drawScreen1_History(bundle, timeInfo);
+    }
+    else
+    {
+      drawScreen2_Nautical(bundle, timeInfo);
+    }
+
+    drawPageIndicator(bundle.current_page);
+    drawCustomStatusBar(bundle, timeInfo);
+  } while (display.nextPage());
+  powerOffDisplay();
+}
+
 

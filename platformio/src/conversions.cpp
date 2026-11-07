@@ -67,6 +67,16 @@ int meterspersecond_to_beaufort(float meterspersecond)
   return beaufort > 12 ? 12 : beaufort;
 } // end meterspersecond_to_beaufort
 
+float knots_to_kilometersperhour(float knots)
+{
+  return knots * 1.852f;
+}
+
+float knots_to_meterspersecond(float knots)
+{
+  return knots * 0.514444f;
+}
+
 float hectopascals_to_pascals(float hectopascals)
 {
   return hectopascals * 100.f;

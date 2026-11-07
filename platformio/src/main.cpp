@@ -1,18 +1,6 @@
 /* Main program for esp32-weather-epd.
- * Copyright (C) 2022-2026  Luke Marzen
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ * Multi-station monitor for Torre del Greco (Collina 154m + Porto Pontile + Casa AHT20)
+ * with SD card logging, offline fallback, and multi-screen navigation.
  */
 
 #include "config.h"
@@ -26,42 +14,86 @@
 #include "_locale.h"
 #include "api_response.h"
 #include "client_utils.h"
-#include "config.h"
 #include "display_utils.h"
-#ifdef USE_OPENWEATHER_MOCK_DATA
-  #include "mock_weather.h"
-#endif
+#include "renderer.h"
+#include "station_data.h"
+#include "storage_utils.h"
+#include "scraper_utils.h"
+
 #ifdef DISP_3C_E420
   #include "icons/icons_96x96.h"
 #else
   #include "icons/icons_196x196.h"
 #endif
-#include "renderer.h"
 
-#if defined(SENSOR_BME280)
-  #include <Adafruit_BME280.h>
+#ifdef USE_OPENWEATHER_MOCK_DATA
+  #include "mock_weather.h"
 #endif
-#if defined(SENSOR_BME680)
-  #include <Adafruit_BME680.h>
-#endif
+
 #if defined(SENSOR_AHT20)
   #include <Adafruit_AHTX0.h>
 #endif
-#if defined(USE_HTTPS_WITH_CERT_VERIF) || defined(USE_HTTPS_WITH_CERT_VERIF)
+#if defined(USE_HTTPS_WITH_CERT_VERIF) || defined(USE_HTTPS_NO_CERT_VERIF)
   #include <WiFiClientSecure.h>
 #endif
 #ifdef USE_HTTPS_WITH_CERT_VERIF
   #include "cert.h"
 #endif
 
-// too large to allocate locally on stack
+// Persist bundle across Deep Sleep cycles in RTC Slow Memory (<1 KB)
+RTC_DATA_ATTR weather_bundle_t rtc_bundle;
+
+// OpenWeather structures for today's forecast and mock data
 static owm_resp_onecall_t       owm_onecall;
 static owm_resp_air_pollution_t owm_air_pollution;
 
 Preferences prefs;
 
+/* Reads on-board AHT20 environment sensor
+ */
+bool readIndoorSensor(float &inTemp, float &inHumidity)
+{
+  pinMode(PIN_SENSOR_PWR, OUTPUT);
+  digitalWrite(PIN_SENSOR_PWR, HIGH);
+  delay(100); // AHT20 power-on stabilization delay
+
+  TwoWire I2C_sensor = TwoWire(0);
+  I2C_sensor.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL, 100000);
+
+  bool sensorFound = false;
+  inTemp     = NAN;
+  inHumidity = NAN;
+
+#if defined(SENSOR_AHT20)
+  Adafruit_AHTX0 aht;
+  I2C_sensor.beginTransmission(AHT20_ADDRESS);
+  if (I2C_sensor.endTransmission() == 0)
+  {
+    delay(20); // Small settling delay after bus probe
+    sensorFound = aht.begin(&I2C_sensor);
+  }
+  if (sensorFound)
+  {
+    sensors_event_t humidityEvent, temperatureEvent;
+    if (aht.getEvent(&humidityEvent, &temperatureEvent))
+    {
+      inTemp     = temperatureEvent.temperature;
+      inHumidity = humidityEvent.relative_humidity;
+      Serial.printf("[Sensor] AHT20 Temp: %.1f \260C, Hum: %.1f %%\n", inTemp, inHumidity);
+    }
+  }
+  else
+  {
+    Serial.println("[Sensor] AHT20 begin failed or not found");
+  }
+#endif
+
+  digitalWrite(PIN_SENSOR_PWR, LOW);
+  return sensorFound && !std::isnan(inTemp) && !std::isnan(inHumidity);
+}
+
 /* Put esp32 into ultra low-power deep sleep (<11μA).
- * Aligns wake time to the minute. Sleep times defined in config.cpp.
+ * Aligns wake time to the minute. Configures hardware button interrupts.
  */
 void beginDeepSleep(unsigned long startTime, tm *timeInfo)
 {
@@ -70,39 +102,26 @@ void beginDeepSleep(unsigned long startTime, tm *timeInfo)
     Serial.println(TXT_REFERENCING_OLDER_TIME_NOTICE);
   }
 
-  // To simplify sleep time calculations, the current time stored by timeInfo
-  // will be converted to time relative to the WAKE_TIME. This way if a
-  // SLEEP_DURATION is not a multiple of 60 minutes it can be more trivially,
-  // aligned and it can easily be deterimined whether we must sleep for
-  // additional time due to bedtime.
-  // i.e. when curHour == 0, then timeInfo->tm_hour == WAKE_TIME
   int bedtimeHour = INT_MAX;
   if (BED_TIME != WAKE_TIME)
   {
     bedtimeHour = (BED_TIME - WAKE_TIME + 24) % 24;
   }
 
-  // time is relative to wake time
   int curHour = (timeInfo->tm_hour - WAKE_TIME + 24) % 24;
   const int curMinute = curHour * 60 + timeInfo->tm_min;
-  const int curSecond = curHour * 3600
-                      + timeInfo->tm_min * 60
-                      + timeInfo->tm_sec;
+  const int curSecond = curHour * 3600 + timeInfo->tm_min * 60 + timeInfo->tm_sec;
   const int desiredSleepSeconds = SLEEP_DURATION * 60;
   const int offsetMinutes = curMinute % SLEEP_DURATION;
   const int offsetSeconds = curSecond % desiredSleepSeconds;
 
-  // align wake time to nearest multiple of SLEEP_DURATION
   int sleepMinutes = SLEEP_DURATION - offsetMinutes;
   if (desiredSleepSeconds - offsetSeconds < 120
    || offsetSeconds / (float)desiredSleepSeconds > 0.95f)
-  { // if we have a sleep time less than 2 minutes OR less 5% SLEEP_DURATION,
-    // skip to next alignment
+  {
     sleepMinutes += SLEEP_DURATION;
   }
 
-  // estimated wake time, if this falls in a sleep period then sleepDuration
-  // must be adjusted
   const int predictedWakeHour = ((curMinute + sleepMinutes) / 60) % 24;
 
   uint64_t sleepDuration;
@@ -113,11 +132,9 @@ void beginDeepSleep(unsigned long startTime, tm *timeInfo)
   else
   {
     const int hoursUntilWake = 24 - curHour;
-    sleepDuration = hoursUntilWake * 3600ULL
-                    - (timeInfo->tm_min * 60ULL + timeInfo->tm_sec);
+    sleepDuration = hoursUntilWake * 3600ULL - (timeInfo->tm_min * 60ULL + timeInfo->tm_sec);
   }
 
-  // add extra delay to compensate for esp32's with fast RTCs.
   sleepDuration += 3ULL;
   sleepDuration *= 1.0015f;
 
@@ -125,13 +142,19 @@ void beginDeepSleep(unsigned long startTime, tm *timeInfo)
   printHeapUsage();
 #endif
 
+  // Configure hardware button wakeup: BOOT (GPIO 0 is an RTC IO on ESP32-S3)
+#if defined(NM_EPD_420)
+  pinMode(PIN_KEY_BOOT, INPUT_PULLUP);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)PIN_KEY_BOOT, 0); // 0 = LOW
+#endif
+
   esp_sleep_enable_timer_wakeup(sleepDuration * 1000000ULL);
   Serial.print(TXT_AWAKE_FOR);
-  Serial.println(" "  + String((millis() - startTime) / 1000.0, 3) + "s");
+  Serial.println(" " + String((millis() - startTime) / 1000.0, 3) + "s");
   Serial.print(TXT_ENTERING_DEEP_SLEEP_FOR);
   Serial.println(" " + String(sleepDuration) + "s");
   esp_deep_sleep_start();
-} // end beginDeepSleep
+}
 
 /* Program entry point.
  */
@@ -146,7 +169,60 @@ void setup()
 
   disableBuiltinLED();
 
-  // Open namespace for read/write to non-volatile storage
+  // 1. Check Wakeup Reason
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  bool isExt0Wakeup = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0);
+  bool isButtonPressed = false;
+  bool isLongPress = false;
+
+#if defined(NM_EPD_420)
+  pinMode(PIN_KEY_BOOT, INPUT_PULLUP);
+  pinMode(PIN_KEY_USER, INPUT_PULLUP);
+
+  if (isExt0Wakeup || digitalRead(PIN_KEY_BOOT) == LOW)
+  {
+    isButtonPressed = true;
+    unsigned long pressStart = millis();
+    while (digitalRead(PIN_KEY_BOOT) == LOW && (millis() - pressStart) < 1200)
+    {
+      delay(20);
+    }
+    isLongPress = (millis() - pressStart) >= 1200;
+  }
+  else if (digitalRead(PIN_KEY_USER) == LOW)
+  {
+    isButtonPressed = true;
+    isLongPress = false;
+  }
+#endif
+
+  // 2. FAST PATH: Short press on BOOT (or USER) -> Cycle page immediately without WiFi
+  if (isButtonPressed && !isLongPress && (rtc_bundle.magic == WEATHER_MAGIC_NUMBER))
+  {
+    Serial.println("[Wakeup] Button clicked -> cycling screen without WiFi...");
+    rtc_bundle.current_page = (rtc_bundle.current_page + 1) % 3;
+
+    // Refresh indoor AHT20 sensor
+    float inTemp = NAN, inHum = NAN;
+    if (readIndoorSensor(inTemp, inHum))
+    {
+      rtc_bundle.indoor.temp = inTemp;
+      rtc_bundle.indoor.humidity = inHum;
+      rtc_bundle.indoor.valid = true;
+    }
+
+    tm timeInfo = {};
+    getLocalTime(&timeInfo);
+
+    renderWeatherBundle(rtc_bundle, timeInfo);
+    beginDeepSleep(startTime, &timeInfo);
+    return;
+  }
+
+  // 3. FULL PATH: Timer wakeup, long press, or initial Boot
+  Serial.println("[Wakeup] Full update cycle initiated...");
+
+  // Initialize NVS
   prefs.begin(NVS_NAMESPACE, false);
 
 #if BATTERY_MONITORING
@@ -154,17 +230,11 @@ void setup()
   Serial.print(TXT_BATTERY_VOLTAGE);
   Serial.println(": " + String(batteryVoltage) + "mv");
 
-  // When the battery is low, the display should be updated to reflect that, but
-  // only the first time we detect low voltage. The next time the display will
-  // refresh is when voltage is no longer low. To keep track of that we will
-  // make use of non-volatile storage.
   bool lowBat = prefs.getBool("lowBat", false);
-
-  // low battery, deep sleep now
   if (batteryVoltage <= LOW_BATTERY_VOLTAGE)
   {
-    if (lowBat == false)
-    { // battery is now low for the first time
+    if (!lowBat)
+    {
       prefs.putBool("lowBat", true);
       prefs.end();
       initDisplay();
@@ -178,258 +248,101 @@ void setup()
       } while (display.nextPage());
       powerOffDisplay();
     }
-
-    if (batteryVoltage <= CRIT_LOW_BATTERY_VOLTAGE)
-    { // critically low battery
-      // don't set esp_sleep_enable_timer_wakeup();
-      // We won't wake up again until someone manually presses the RST button.
-      Serial.println(TXT_CRIT_LOW_BATTERY_VOLTAGE);
-      Serial.println(TXT_HIBERNATING_INDEFINITELY_NOTICE);
-    }
-    else if (batteryVoltage <= VERY_LOW_BATTERY_VOLTAGE)
-    { // very low battery
-      esp_sleep_enable_timer_wakeup(VERY_LOW_BATTERY_SLEEP_INTERVAL
-                                    * 60ULL * 1000000ULL);
-      Serial.println(TXT_VERY_LOW_BATTERY_VOLTAGE);
-      Serial.print(TXT_ENTERING_DEEP_SLEEP_FOR);
-      Serial.println(" " + String(VERY_LOW_BATTERY_SLEEP_INTERVAL) + "min");
-    }
-    else
-    { // low battery
-      esp_sleep_enable_timer_wakeup(LOW_BATTERY_SLEEP_INTERVAL
-                                    * 60ULL * 1000000ULL);
-      Serial.println(TXT_LOW_BATTERY_VOLTAGE);
-      Serial.print(TXT_ENTERING_DEEP_SLEEP_FOR);
-      Serial.println(" " + String(LOW_BATTERY_SLEEP_INTERVAL) + "min");
-    }
     esp_deep_sleep_start();
   }
-  // battery is no longer low, reset variable in non-volatile storage
-  if (lowBat == true)
-  {
-    prefs.putBool("lowBat", false);
-  }
+  if (lowBat) prefs.putBool("lowBat", false);
 #else
-  uint32_t batteryVoltage = UINT32_MAX;
+  uint32_t batteryVoltage = 0;
 #endif
 
-  // All data should have been loaded from NVS. Close filesystem.
   prefs.end();
 
-  String statusStr = {};
-  String tmpStr = {};
+  // If first boot or RTC memory invalid, restore cached state from SD
+  initSD();
+  if (rtc_bundle.magic != WEATHER_MAGIC_NUMBER)
+  {
+    Serial.println("[Init] Initializing bundle from SD cache / defaults...");
+    memset(&rtc_bundle, 0, sizeof(rtc_bundle));
+    rtc_bundle.magic = WEATHER_MAGIC_NUMBER;
+    rtc_bundle.current_page = 0;
+    loadLatestWeather(rtc_bundle);
+  }
+
   tm timeInfo = {};
-
-  // START WIFI
-  int wifiRSSI = 0; // “Received Signal Strength Indicator"
+  int wifiRSSI = 0;
   wl_status_t wifiStatus = startWiFi(wifiRSSI);
-  if (wifiStatus != WL_CONNECTED)
-  { // WiFi Connection Failed
-    killWiFi();
-    initDisplay();
-    if (wifiStatus == WL_NO_SSID_AVAIL)
-    {
-      Serial.println(TXT_NETWORK_NOT_AVAILABLE);
-      do
-      {
-        #ifdef DISP_3C_E420
-        drawError(wifi_x_96x96, TXT_NETWORK_NOT_AVAILABLE);
-        #else
-        drawError(wifi_x_196x196, TXT_NETWORK_NOT_AVAILABLE);
-        #endif
-      } while (display.nextPage());
-    }
-    else
-    {
-      Serial.println(TXT_WIFI_CONNECTION_FAILED);
-      do
-      {
-        #ifdef DISP_3C_E420
-        drawError(wifi_x_96x96, TXT_WIFI_CONNECTION_FAILED);
-        #else
-        drawError(wifi_x_196x196, TXT_WIFI_CONNECTION_FAILED);
-        #endif
-      } while (display.nextPage());
-    }
-    powerOffDisplay();
-    beginDeepSleep(startTime, &timeInfo);
-  }
 
-  // TIME SYNCHRONIZATION
-  configTzTime(TIMEZONE, NTP_SERVER_1, NTP_SERVER_2);
-  bool timeConfigured = waitForSNTPSync(&timeInfo);
-  if (!timeConfigured)
+  if (wifiStatus == WL_CONNECTED)
   {
-    Serial.println(TXT_TIME_SYNCHRONIZATION_FAILED);
-    killWiFi();
-    initDisplay();
-    do
-    {
-      #ifdef DISP_3C_E420
-      drawError(wi_time_4_96x96, TXT_TIME_SYNCHRONIZATION_FAILED);
-      #else
-      drawError(wi_time_4_196x196, TXT_TIME_SYNCHRONIZATION_FAILED);
-      #endif
-    } while (display.nextPage());
-    powerOffDisplay();
-    beginDeepSleep(startTime, &timeInfo);
-  }
+    // Synchronize NTP Time
+    configTzTime(TIMEZONE, NTP_SERVER_1, NTP_SERVER_2);
+    waitForSNTPSync(&timeInfo);
 
-  // MAKE API REQUESTS
+    // Fetch Weather Data from both local stations with fresh independent clients
+    {
+      WiFiClient client1;
+      fetchCampaniaLive(client1, rtc_bundle.hill);
+    }
+
+    delay(200); // Allow previous socket and lwIP TCP buffers to fully settle
+
+    {
+      WiFiClient client2;
+      fetchLegaNavale(client2, rtc_bundle.port);
+    }
+
+    // Fetch Today's Forecast from OWM or Mock
 #ifdef USE_OPENWEATHER_MOCK_DATA
-  loadMockOpenWeatherData(owm_onecall, owm_air_pollution);
-  statusStr = "Using OpenWeather data";
+    loadMockOpenWeatherData(owm_onecall, owm_air_pollution);
+    populateTodayForecastFromOWM(&owm_onecall, rtc_bundle.today);
 #else
-#ifdef USE_HTTP
-  WiFiClient client;
-#elif defined(USE_HTTPS_NO_CERT_VERIF)
-  WiFiClientSecure client;
-  client.setInsecure();
-#elif defined(USE_HTTPS_WITH_CERT_VERIF)
-  WiFiClientSecure client;
-  client.setCACert(cert_Sectigo_Public_Server_Authentication_Root_R46);
-#endif
-  int rxStatus = getOWMonecall(client, owm_onecall);
-  if (rxStatus != HTTP_CODE_OK)
-  {
-    killWiFi();
-    statusStr = "One Call " + OWM_ONECALL_VERSION + " API";
-    tmpStr = String(rxStatus, DEC) + ": " + getHttpResponsePhrase(rxStatus);
-    initDisplay();
-    do
     {
-      #ifdef DISP_3C_E420
-      drawError(wi_cloud_down_96x96, statusStr, tmpStr);
-      #else
-      drawError(wi_cloud_down_196x196, statusStr, tmpStr);
-      #endif
-    } while (display.nextPage());
-    powerOffDisplay();
-    beginDeepSleep(startTime, &timeInfo);
-  }
-  rxStatus = getOWMairpollution(client, owm_air_pollution);
-  if (rxStatus != HTTP_CODE_OK)
-  {
-    killWiFi();
-    statusStr = "Air Pollution API";
-    tmpStr = String(rxStatus, DEC) + ": " + getHttpResponsePhrase(rxStatus);
-    initDisplay();
-    do
-    {
-      #ifdef DISP_3C_E420
-      drawError(wi_cloud_down_96x96, statusStr, tmpStr);
-      #else
-      drawError(wi_cloud_down_196x196, statusStr, tmpStr);
-      #endif
-    } while (display.nextPage());
-    powerOffDisplay();
-    beginDeepSleep(startTime, &timeInfo);
-  }
-  killWiFi(); // WiFi no longer needed
+      WiFiClientSecure secureClient3;
+      secureClient3.setInsecure();
+      int rxStatus = getOWMonecall(secureClient3, owm_onecall);
+      if (rxStatus == HTTP_CODE_OK)
+      {
+        populateTodayForecastFromOWM(&owm_onecall, rtc_bundle.today);
+      }
+    }
 #endif
 
-  // GET INDOOR TEMPERATURE AND HUMIDITY
-  pinMode(PIN_SENSOR_PWR, OUTPUT);
-  digitalWrite(PIN_SENSOR_PWR, HIGH);
-#if defined(SENSOR_AHT20)
-  delay(50); // AHT20 requires at least 40ms after power-on
-#elif defined(SENSOR_INIT_DELAY_MS) && SENSOR_INIT_DELAY_MS > 0
-  delay(SENSOR_INIT_DELAY_MS);
-#endif
-  TwoWire I2C_sensor = TwoWire(0);
-  I2C_sensor.begin(PIN_SENSOR_SDA, PIN_SENSOR_SCL, 100000); // 100kHz
-  float inTemp     = NAN;
-  float inHumidity = NAN;
-  bool sensorFound = false;
-#if defined(SENSOR_BME280)
-  const char *sensorName = "BME280";
-  Adafruit_BME280 bme;
-  sensorFound = bme.begin(BME_ADDRESS, &I2C_sensor);
-  if (sensorFound)
-  {
-    inTemp     = bme.readTemperature(); // Celsius
-    inHumidity = bme.readHumidity();    // %
-  }
-#elif defined(SENSOR_BME680)
-  const char *sensorName = "BME680";
-  Adafruit_BME680 bme(&I2C_sensor);
-  sensorFound = bme.begin(BME_ADDRESS);
-  if (sensorFound)
-  {
-    inTemp     = bme.readTemperature(); // Celsius
-    inHumidity = bme.readHumidity();    // %
-  }
-#elif defined(SENSOR_AHT20)
-  const char *sensorName = "AHT20";
-  Adafruit_AHTX0 aht;
-  I2C_sensor.beginTransmission(AHT20_ADDRESS);
-  if (I2C_sensor.endTransmission() == 0)
-  {
-    sensorFound = aht.begin(&I2C_sensor);
-  }
-  if (sensorFound)
-  {
-    sensors_event_t humidityEvent;
-    sensors_event_t temperatureEvent;
-    if (aht.getEvent(&humidityEvent, &temperatureEvent))
-    {
-      inTemp     = temperatureEvent.temperature;    // Celsius
-      inHumidity = humidityEvent.relative_humidity; // %
-    }
-  }
-#endif
-  Serial.print(String(TXT_READING_FROM) + " " + sensorName + "... ");
-  if (sensorFound)
-  {
-    // Check if sensor readings are valid.
-    // note: readings are checked again before drawing to screen. If a reading
-    //       is not a number (NAN) then an error occurred, a dash '-' will be
-    //       displayed.
-    if (std::isnan(inTemp) || std::isnan(inHumidity))
-    {
-      statusStr = String(sensorName) + " " + TXT_READ_FAILED;
-      Serial.println(statusStr);
-    }
-    else
-    {
-      Serial.println(TXT_SUCCESS);
-    }
+    killWiFi();
+
+    rtc_bundle.is_offline = false;
+    rtc_bundle.last_sync_epoch = time(nullptr);
+    rtc_bundle.wifi_rssi = wifiRSSI;
+
+    // Persist to SD Card
+    saveLatestWeather(rtc_bundle);
+    appendLogCSV(rtc_bundle.last_sync_epoch, rtc_bundle);
+    addTrendSample(rtc_bundle, rtc_bundle.last_sync_epoch);
+    updateHistoryAndTrend(rtc_bundle, &timeInfo);
   }
   else
   {
-    statusStr = String(sensorName) + " " + TXT_NOT_FOUND; // check wiring
-    Serial.println(statusStr);
+    // Offline Fallback
+    Serial.println("[WiFi] Connection failed. Entering OFFLINE mode with cached data.");
+    killWiFi();
+    rtc_bundle.is_offline = true;
+    getLocalTime(&timeInfo);
   }
-  digitalWrite(PIN_SENSOR_PWR, LOW);
 
-  String refreshTimeStr;
-  getRefreshTimeStr(refreshTimeStr, timeConfigured, &timeInfo);
-  String dateStr;
-  getDateStr(dateStr, &timeInfo);
+  // Read Internal AHT20 Sensor
+  float inTemp = NAN, inHumidity = NAN;
+  bool sensorFound = readIndoorSensor(inTemp, inHumidity);
+  rtc_bundle.indoor.temp     = inTemp;
+  rtc_bundle.indoor.humidity = inHumidity;
+  rtc_bundle.indoor.valid    = sensorFound;
+  rtc_bundle.battery_mv      = batteryVoltage;
 
-  // RENDER FULL REFRESH
-  initDisplay();
-  do
-  {
-    drawCurrentConditions(owm_onecall.current, owm_onecall.daily[0],
-                          owm_air_pollution, inTemp, inHumidity);
-    drawOutlookGraph(owm_onecall.hourly, owm_onecall.daily, timeInfo);
-    drawForecast(owm_onecall.daily, timeInfo);
-    drawLocationDate(CITY_STRING, dateStr);
-#if DISPLAY_ALERTS
-    drawAlerts(owm_onecall.alerts, CITY_STRING, dateStr);
-#endif
-    drawStatusBar(statusStr, refreshTimeStr, wifiRSSI, batteryVoltage);
-  } while (display.nextPage());
-  powerOffDisplay();
+  // Render display (never blanks screen, shows cached data with OFFLINE badge if disconnected)
+  renderWeatherBundle(rtc_bundle, timeInfo);
 
-  // DEEP SLEEP
+  // Enter deep sleep
   beginDeepSleep(startTime, &timeInfo);
-} // end setup
+}
 
-/* This will never run
- */
 void loop()
 {
-} // end loop
-
+}
