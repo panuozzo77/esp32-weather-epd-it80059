@@ -28,6 +28,8 @@ float meterspersecond_to_kilometersperhour(float meterspersecond);
 float meterspersecond_to_milesperhour(float meterspersecond);
 float meterspersecond_to_knots(float meterspersecond);
 int meterspersecond_to_beaufort(float meterspersecond);
+float knots_to_kilometersperhour(float knots);
+float knots_to_meterspersecond(float knots);
 
 float hectopascals_to_pascals(float hectopascals);
 float hectopascals_to_millimetersofmercury(float hectopascals);
