@@ -23,6 +23,7 @@
 #include <time.h>
 #include "api_response.h"
 #include "config.h"
+#include "station_data.h"
 
 #ifdef DISP_BW_V2
   #define DISP_WIDTH  800
@@ -91,6 +92,14 @@ void drawStatusBar(const String &statusStr, const String &refreshTimeStr,
                    int rssi, uint32_t batVoltage);
 void drawError(const uint8_t *bitmap,
                const String &errMsgLn1, const String &errMsgLn2="");
+
+// Multi-Screen rendering functions for 400x300 e-paper
+void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo);
+void drawScreen1_History(const weather_bundle_t &bundle, const tm &timeInfo);
+void drawScreen2_Nautical(const weather_bundle_t &bundle, const tm &timeInfo);
+void drawPageIndicator(uint8_t page);
+void drawCustomStatusBar(const weather_bundle_t &bundle, const tm &timeInfo);
+void renderWeatherBundle(const weather_bundle_t &bundle, const tm &timeInfo);
 void drawCurrentSunrise(const owm_current_t &current);
 void drawCurrentSunset(const owm_current_t &current);
 void drawCurrentInTemp(float inTemp);
