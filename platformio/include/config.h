@@ -82,7 +82,7 @@
 //   Dutch (Belgium)                 nl_BE
 //   Portuguese (Brazil)             pt_BR
 //   Spanish (Spain)                 es_ES
-#define LOCALE en_US
+#define LOCALE it_IT
 
 // UNITS
 // Define exactly one macro for each measurement type below.
@@ -331,6 +331,12 @@
 extern const uint8_t PIN_BAT_ADC;
 #if defined(NM_EPD_420)
 extern const uint8_t PIN_BAT_ADC_EN; // Battery ADC enable pin (active HIGH)
+extern const uint8_t PIN_SD_CS;
+extern const uint8_t PIN_SD_SCK;
+extern const uint8_t PIN_SD_MOSI;
+extern const uint8_t PIN_SD_MISO;
+extern const uint8_t PIN_KEY_USER;
+extern const uint8_t PIN_KEY_BOOT;
 #endif
 extern const uint8_t PIN_EPD_BUSY;
 extern const uint8_t PIN_EPD_CS;
