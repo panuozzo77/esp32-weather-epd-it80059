@@ -90,8 +90,8 @@ const char *TXT_PRESSURE           = "Pressione";
 const char *TXT_AIR_QUALITY        = "Qualit\340 dell'aria";
 const char *TXT_AIR_POLLUTION      = "Inquinamento aria";
 const char *TXT_VISIBILITY         = "Visibilit\340";
-const char *TXT_INDOOR_TEMPERATURE = "Temperatura int.";
-const char *TXT_INDOOR_HUMIDITY    = "Umidit\340 int.";
+const char *TXT_INDOOR_TEMPERATURE = "Temp. int.";
+const char *TXT_INDOOR_HUMIDITY    = "Umid. int.";
 const char *TXT_DEWPOINT           = "Punto di rugiada";
 
 // MOON PHASE
@@ -107,9 +107,9 @@ const char *TXT_WANING_CRESCENT = "Luna calante";
 
 // UV INDEX
 const char *TXT_UV_LOW       = "Basso";
-const char *TXT_UV_MODERATE  = "Moderato";
+const char *TXT_UV_MODERATE  = "Medio";
 const char *TXT_UV_HIGH      = "Alto";
-const char *TXT_UV_VERY_HIGH = "Eccessivo";
+const char *TXT_UV_VERY_HIGH = "Alto+";
 const char *TXT_UV_EXTREME   = "Estremo";
 
 // WIFI
