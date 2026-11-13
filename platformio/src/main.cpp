@@ -211,6 +211,8 @@ void setup()
     }
     isLongPress = (millis() - pressStart) >= 1200;
   }
+  // USER (GPIO45) cannot wake the S3 from deep sleep (not an RTC GPIO); this
+  // only catches it being held during a timer/BOOT wake.
   else if (digitalRead(PIN_KEY_USER) == LOW)
   {
     isButtonPressed = true;

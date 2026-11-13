@@ -58,6 +58,9 @@ const uint8_t PIN_SD_SCK  = 9;
 const uint8_t PIN_SD_MOSI = 10;
 const uint8_t PIN_SD_MISO = 11;
 // Hardware Buttons
+// NOTE: GPIO45 is not an RTC GPIO on the ESP32-S3 (only GPIO0-21 are), so the
+// USER button cannot wake the board from deep sleep. It is only detected if
+// held while the board wakes for another reason. Use BOOT to change page.
 const uint8_t PIN_KEY_USER = 45; // USER button (Active LOW, internal pull-up)
 const uint8_t PIN_KEY_BOOT = 0;  // BOOT button (Active LOW)
 #else
