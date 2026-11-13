@@ -79,6 +79,7 @@ bool saveLatestWeather(const weather_bundle_t &bundle)
   hill["wind_dir"]  = bundle.hill.wind_dir;
   hill["rain_today"]= bundle.hill.rain_today;
   hill["last_update"] = bundle.hill.last_update;
+  hill["obs_epoch"] = (int64_t)bundle.hill.obs_epoch;
 
   // Port (Lega Navale)
   JsonObject port = doc["port"].to<JsonObject>();
@@ -94,6 +95,7 @@ bool saveLatestWeather(const weather_bundle_t &bundle)
   port["uv"]        = bundle.port.uv_index;
   port["rain_today"]= bundle.port.rain_today;
   port["last_update"] = bundle.port.last_update;
+  port["obs_epoch"] = (int64_t)bundle.port.obs_epoch;
 
   // Indoor AHT20
   JsonObject in = doc["indoor"].to<JsonObject>();
@@ -156,6 +158,7 @@ bool loadLatestWeather(weather_bundle_t &bundle)
   strlcpy(bundle.hill.wind_dir, hill["wind_dir"] | "--", sizeof(bundle.hill.wind_dir));
   bundle.hill.rain_today    = hill["rain_today"] | 0.0f;
   strlcpy(bundle.hill.last_update, hill["last_update"] | "--:--", sizeof(bundle.hill.last_update));
+  bundle.hill.obs_epoch     = (time_t)(hill["obs_epoch"] | (int64_t)0);
 
   // Port
   JsonObject port = doc["port"];
@@ -171,6 +174,7 @@ bool loadLatestWeather(weather_bundle_t &bundle)
   bundle.port.uv_index      = port["uv"] | 0;
   bundle.port.rain_today    = port["rain_today"] | 0.0f;
   strlcpy(bundle.port.last_update, port["last_update"] | "--:--", sizeof(bundle.port.last_update));
+  bundle.port.obs_epoch     = (time_t)(port["obs_epoch"] | (int64_t)0);
 
   // Indoor
   JsonObject in = doc["indoor"];

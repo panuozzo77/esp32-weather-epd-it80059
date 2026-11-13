@@ -105,6 +105,44 @@ static bool fetchFields(const char *host, const char *path, bool https,
   return true;
 }
 
+// Sets the station's observation time from the page's own timestamp, so a
+// station that stopped uploading is not presented as current. Falls back to
+// the fetch time if the timestamp cannot be parsed.
+static void setObservationTime(const html_field_t &f, local_station_t &st)
+{
+  int y, mo, d, h, mi;
+  time_t obs = 0;
+  if (f.found && htmlParseDateTime(f.value, y, mo, d, h, mi))
+  {
+    tm t = {};
+    t.tm_year = y - 1900;
+    t.tm_mon  = mo - 1;
+    t.tm_mday = d;
+    t.tm_hour = h;
+    t.tm_min  = mi;
+    t.tm_isdst = -1; // let the TZ rules decide
+    obs = mktime(&t);
+  }
+  else
+  {
+    Serial.printf("[Scraper] Could not parse station timestamp '%s'\n", f.value);
+  }
+  if (obs <= 0) obs = time(nullptr);
+
+  st.obs_epoch = obs;
+  tm tmInfo;
+  localtime_r(&obs, &tmInfo);
+  snprintf(st.last_update, sizeof(st.last_update), "%02d/%02d %02d:%02d",
+           tmInfo.tm_mday, tmInfo.tm_mon + 1, tmInfo.tm_hour, tmInfo.tm_min);
+
+  long age = (long)(time(nullptr) - obs);
+  if (age > STATION_STALE_SECONDS)
+  {
+    Serial.printf("[Scraper] Station data is stale: last observation %s (%ld min ago)\n",
+                  st.last_update, age / 60);
+  }
+}
+
 // Parses a numeric field and checks it against a plausible range, so that a
 // placeholder ("--") or a value grabbed from the wrong place is rejected
 // instead of being shown as e.g. 0 C.
@@ -128,7 +166,7 @@ bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
   (void)client;
   Serial.println("[Scraper] Connecting to Campania Live (Torre del Greco 154m)...");
 
-  enum { F_TEMP, F_TMAX, F_TMIN, F_HUM, F_PRESS, F_WIND, F_GUST, F_RAIN, F_COUNT };
+  enum { F_TEMP, F_TMAX, F_TMIN, F_HUM, F_PRESS, F_WIND, F_GUST, F_RAIN, F_UPD, F_COUNT };
   html_field_t f[F_COUNT] = {};
   f[F_TEMP]  = { "Temperatura attuale<", "<font" };
   f[F_TMAX]  = { "Temperatura massima<", "<font" };
@@ -138,6 +176,7 @@ bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
   f[F_WIND]  = { "Vento medio ultimi 10 minuti<", "<font" };
   f[F_GUST]  = { "Raffica massima di oggi<", "<font" };
   f[F_RAIN]  = { "Pioggia oggi<", "<font" };
+  f[F_UPD]   = { "Ultimo rilevamento:", "" }; // "11&nbsp;novembre&nbsp;2026 ore 23:40"
   HtmlFieldExtractor extractor(f, F_COUNT);
 
   bool ok = fetchFields(CAMPANIALIVE_HOST, CAMPANIALIVE_PATH, false, extractor)
@@ -184,10 +223,7 @@ bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
                 st.wind_gust_kts, st.rain_today);
 
   st.valid = true;
-  time_t now = time(nullptr);
-  tm tmInfo;
-  localtime_r(&now, &tmInfo);
-  snprintf(st.last_update, sizeof(st.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  setObservationTime(f[F_UPD], st);
   hill = st;
   return true;
 }
@@ -199,7 +235,7 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
   Serial.println("[Scraper] Connecting to Lega Navale (Torre del Greco Pontile)...");
 
   enum { F_TEMP, F_WIND, F_GUST, F_PRESS, F_DEG, F_DIR, F_HUM, F_FEELS,
-         F_SOLAR, F_UV, F_RAIN, F_COUNT };
+         F_SOLAR, F_UV, F_RAIN, F_UPD, F_COUNT };
   html_field_t f[F_COUNT] = {};
   f[F_TEMP]  = { "data-ews-field=\"temperature\"", nullptr };
   f[F_WIND]  = { "data-ews-field=\"wind_speed\"", nullptr };
@@ -212,6 +248,7 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
   f[F_SOLAR] = { ">Irradianza solare<", "class=\"ecowitt-value\"" };
   f[F_UV]    = { ">Indice UV<", "class=\"ecowitt-value\"" };
   f[F_RAIN]  = { ">Oggi<", "class=\"ecowitt-value\"" };
+  f[F_UPD]   = { ">Aggiornamento<", "class=\"value\"" }; // "Novembre 13, 2026 9:25 am"
   HtmlFieldExtractor extractor(f, F_COUNT);
 
   // Plain HTTP first (less RAM and time than TLS), then HTTPS.
@@ -263,10 +300,7 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
                 st.solar_wm2, st.uv_index, st.rain_today);
 
   st.valid = true;
-  time_t now = time(nullptr);
-  tm tmInfo;
-  localtime_r(&now, &tmInfo);
-  snprintf(st.last_update, sizeof(st.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  setObservationTime(f[F_UPD], st);
   port = st;
   return true;
 }

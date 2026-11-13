@@ -2166,6 +2166,25 @@ void drawPageIndicator(uint8_t page)
   drawString(startX + 40, startY, pageBuf, LEFT, GxEPD_BLACK);
 }
 
+// Draws a station's observation time right-aligned inside its card. Shows only
+// HH:MM when the reading is from today, and "!" + red when it is stale.
+static void drawStationTimestamp(int16_t xRight, int16_t y,
+                                 const local_station_t &st, const tm &now)
+{
+  if (st.obs_epoch <= 0) return;
+  tm obs;
+  localtime_r(&st.obs_epoch, &obs);
+  const bool stale = (time(nullptr) - st.obs_epoch) > STATION_STALE_SECONDS;
+  char buf[24];
+  if (obs.tm_yday == now.tm_yday && obs.tm_year == now.tm_year)
+    snprintf(buf, sizeof(buf), "%s%02d:%02d", stale ? "! " : "", obs.tm_hour, obs.tm_min);
+  else
+    snprintf(buf, sizeof(buf), "%s%02d/%02d %02d:%02d", stale ? "! " : "",
+             obs.tm_mday, obs.tm_mon + 1, obs.tm_hour, obs.tm_min);
+  display.setFont(&FONT_5pt8b);
+  drawString(xRight, y, buf, RIGHT, stale ? GxEPD_RED : GxEPD_BLACK);
+}
+
 // Bottom Status Bar
 void drawCustomStatusBar(const weather_bundle_t &bundle, const tm &timeInfo)
 {
@@ -2267,6 +2286,7 @@ void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo)
     char hT[16];
     snprintf(hT, sizeof(hT), "%.1f\260C", bundle.hill.temp);
     drawString(38, 161, hT, LEFT, GxEPD_RED);
+    drawStationTimestamp(190, 161, bundle.hill, timeInfo);
 
     display.setFont(&FONT_5pt8b);
     char hSub[40];
@@ -2300,6 +2320,7 @@ void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo)
     char pT[16];
     snprintf(pT, sizeof(pT), "%.1f\260C", bundle.port.temp);
     drawString(38, 238, pT, LEFT, GxEPD_BLACK);
+    drawStationTimestamp(190, 238, bundle.port, timeInfo);
 
     display.setFont(&FONT_5pt8b);
     char pSub[40];

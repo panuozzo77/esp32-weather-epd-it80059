@@ -9,7 +9,12 @@
 #include <Arduino.h>
 #include <time.h>
 
-#define WEATHER_MAGIC_NUMBER 0x57455044 // "WEPD" in hex
+// Bump whenever the layout of weather_bundle_t changes so stale RTC memory is
+// not reinterpreted with the new layout.
+#define WEATHER_MAGIC_NUMBER 0x57455045 // "WEPE" (layout v2: obs_epoch)
+
+// A station reading older than this is flagged as stale on the display.
+#define STATION_STALE_SECONDS (2 * 3600)
 
 typedef struct local_station {
   bool  valid;
@@ -26,7 +31,8 @@ typedef struct local_station {
   float rain_today;     // mm
   float solar_wm2;      // W/m² (Lega Navale)
   int   uv_index;       // UV index (Lega Navale)
-  char  last_update[24];// e.g. "13:45"
+  char  last_update[24];// station's own observation time, "DD/MM HH:MM"
+  time_t obs_epoch;     // station's own observation time (0 = unknown)
 } local_station_t;
 
 typedef struct indoor_sensor {
