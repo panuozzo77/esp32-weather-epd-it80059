@@ -11,10 +11,13 @@
 
 // Bump whenever the layout of weather_bundle_t changes so stale RTC memory is
 // not reinterpreted with the new layout.
-#define WEATHER_MAGIC_NUMBER 0x57455045 // "WEPE" (layout v2: obs_epoch)
+#define WEATHER_MAGIC_NUMBER 0x57455046 // "WEPF" (layout v3: 72-sample trend)
 
 // A station reading older than this is flagged as stale on the display.
 #define STATION_STALE_SECONDS (2 * 3600)
+
+// 24 h of samples at the 20-minute refresh interval.
+#define TREND_MAX_SAMPLES 72
 
 typedef struct local_station {
   bool  valid;
@@ -79,7 +82,7 @@ typedef struct weather_bundle {
   indoor_sensor_t  indoor;            // On-board AHT20
   today_forecast_t today;             // Today's forecast & astro
   daily_summary_t  history[5];        // History of past 4 days + today
-  hourly_sample_t  trend_24h[24];     // 24 samples for 24h temperature curve
+  hourly_sample_t  trend_24h[TREND_MAX_SAMPLES]; // last 24 h, oldest first
   uint8_t          trend_count;       // Current count of valid trend points
   time_t           last_sync_epoch;   // Timestamp of last successful network fetch
   bool             is_offline;        // true if showing cached data due to WiFi failure

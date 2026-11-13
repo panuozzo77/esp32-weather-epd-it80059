@@ -261,6 +261,20 @@ bool appendLogCSV(time_t epoch, const weather_bundle_t &bundle)
   return true;
 }
 
+static void appendTrend(weather_bundle_t &bundle, const hourly_sample_t &sample)
+{
+  if (bundle.trend_count < TREND_MAX_SAMPLES)
+  {
+    bundle.trend_24h[bundle.trend_count++] = sample;
+  }
+  else
+  {
+    memmove(&bundle.trend_24h[0], &bundle.trend_24h[1],
+            sizeof(hourly_sample_t) * (TREND_MAX_SAMPLES - 1));
+    bundle.trend_24h[TREND_MAX_SAMPLES - 1] = sample;
+  }
+}
+
 void addTrendSample(weather_bundle_t &bundle, time_t ts)
 {
   hourly_sample_t sample;
@@ -270,20 +284,36 @@ void addTrendSample(weather_bundle_t &bundle, time_t ts)
   sample.indoor_temp = bundle.indoor.valid ? bundle.indoor.temp : NAN;
   sample.rain_mm     = bundle.port.valid ? bundle.port.rain_today :
                        (bundle.hill.valid ? bundle.hill.rain_today : 0.0f);
+  appendTrend(bundle, sample);
+}
 
-  if (bundle.trend_count < 24)
+// CSV columns (see appendLogCSV).
+enum {
+  CSV_EPOCH = 0, CSV_HILL_TEMP = 2, CSV_HILL_GUST = 6, CSV_HILL_RAIN = 7,
+  CSV_PORT_TEMP = 8, CSV_PORT_GUST = 11, CSV_IN_TEMP = 15, CSV_FIELDS = 17
+};
+
+// Splits a CSV row into floats; "nan", empty or non-numeric fields become NAN.
+static int parseCsvFloats(const char *line, float *out, int maxFields)
+{
+  int n = 0;
+  const char *p = line;
+  while (n < maxFields)
   {
-    bundle.trend_24h[bundle.trend_count++] = sample;
+    const char *end = strchr(p, ',');
+    size_t len = end ? (size_t)(end - p) : strlen(p);
+    char buf[24];
+    size_t l = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    memcpy(buf, p, l);
+    buf[l] = '\0';
+    char *e;
+    float v = strtof(buf, &e);
+    out[n++] = (e == buf) ? NAN : v;
+    if (!end) break;
+    p = end + 1;
   }
-  else
-  {
-    // Shift left by 1 and put at end
-    for (int i = 0; i < 23; ++i)
-    {
-      bundle.trend_24h[i] = bundle.trend_24h[i + 1];
-    }
-    bundle.trend_24h[23] = sample;
-  }
+  for (int i = n; i < maxFields; ++i) out[i] = NAN;
+  return n;
 }
 
 static const char* dayNamesIt[] = {"Dom", "Lun", "Mar", "Mer", "Gio", "Ven", "Sab"};
@@ -320,74 +350,79 @@ bool updateHistoryAndTrend(weather_bundle_t &bundle, const tm *timeInfo)
     bundle.history[0].has_data = true;
   }
 
-  // Read CSV from SD to enrich history of past days
+  // Read the CSV logs from SD to fill the past days and rebuild the 24 h trend
+  // (so the trend survives resets and covers a full day).
   if (!initSD()) return false;
 
-  char filepath[64];
-  snprintf(filepath, sizeof(filepath), "/logs/meteo_%04d_%02d.csv",
-           (int)((timeInfo->tm_year + 1900) % 10000), (int)(timeInfo->tm_mon + 1) % 100);
+  const time_t nowEpoch = mktime(const_cast<tm*>(timeInfo));
+  bool trendReset = false;
 
-  File f = SD.open(filepath, FILE_READ);
-  if (!f) return false;
-
-  // Read CSV line by line
-  // Format: epoch,date_time,hill_temp,hill_hum,hill_pres,hill_wind,hill_gust,hill_rain,port_temp,port_hum,port_wind,port_gust,port_deg,port_solar,port_uv,in_temp,in_hum
-  String line = f.readStringUntil('\n'); // skip header
-  while (f.available())
+  // The last 5 days can span the previous month's file.
+  for (int back = (timeInfo->tm_mday <= 5) ? 1 : 0; back >= 0; --back)
   {
-    line = f.readStringUntil('\n');
-    line.trim();
-    if (line.isEmpty()) continue;
+    int year = timeInfo->tm_year + 1900;
+    int mon  = timeInfo->tm_mon + 1 - back;
+    if (mon < 1) { mon += 12; --year; }
 
-    // Parse epoch
-    int firstComma = line.indexOf(',');
-    if (firstComma <= 0) continue;
-    time_t rowEpoch = atoll(line.substring(0, firstComma).c_str());
-    if (rowEpoch <= 0) continue;
+    char filepath[64];
+    snprintf(filepath, sizeof(filepath), "/logs/meteo_%04d_%02d.csv",
+             year % 10000, mon % 100);
 
-    // Check how many days ago rowEpoch was
-    int diffDays = (mktime(const_cast<tm*>(timeInfo)) - rowEpoch) / 86400;
-    if (diffDays >= 0 && diffDays < 5)
+    File f = SD.open(filepath, FILE_READ);
+    if (!f) continue;
+
+    if (!trendReset)
     {
-      // Extract port_temp (index 8), hill_temp (index 2), port_gust (index 11), rain (index 7 or 9)
-      // Let's do a simple CSV split
-      int curField = 0;
-      float rowHillTemp = NAN;
-      float rowPortTemp = NAN;
-      float rowHillRain = 0.0f;
-      float rowPortRain = 0.0f;
-      float rowWindGust = 0.0f;
+      bundle.trend_count = 0;
+      trendReset = true;
+    }
 
-      int prevComma = -1;
-      while (prevComma < (int)line.length())
+    String line = f.readStringUntil('\n'); // skip header
+    while (f.available())
+    {
+      line = f.readStringUntil('\n');
+      line.trim();
+      if (line.isEmpty()) continue;
+
+      time_t rowEpoch = (time_t)atoll(line.c_str());
+      if (rowEpoch <= 0 || rowEpoch > nowEpoch + 600) continue;
+
+      long age = (long)(nowEpoch - rowEpoch);
+      int diffDays = age / 86400;
+      if (diffDays >= 5) continue;
+
+      float v[CSV_FIELDS];
+      parseCsvFloats(line.c_str(), v, CSV_FIELDS);
+
+      if (age <= 86400)
       {
-        int nextComma = line.indexOf(',', prevComma + 1);
-        if (nextComma == -1) nextComma = line.length();
-        String field = line.substring(prevComma + 1, nextComma);
-        field.trim();
-
-        if (curField == 2 && !field.equalsIgnoreCase("nan")) rowHillTemp = field.toFloat();
-        if (curField == 6) rowWindGust = std::max(rowWindGust, field.toFloat());
-        if (curField == 7) rowHillRain = field.toFloat();
-        if (curField == 8 && !field.equalsIgnoreCase("nan")) rowPortTemp = field.toFloat();
-        if (curField == 11) rowWindGust = std::max(rowWindGust, field.toFloat());
-
-        prevComma = nextComma;
-        curField++;
+        hourly_sample_t sample;
+        sample.timestamp   = rowEpoch;
+        sample.hill_temp   = v[CSV_HILL_TEMP];
+        sample.port_temp   = v[CSV_PORT_TEMP];
+        sample.indoor_temp = v[CSV_IN_TEMP];
+        sample.rain_mm     = std::isnan(v[CSV_HILL_RAIN]) ? 0.0f : v[CSV_HILL_RAIN];
+        appendTrend(bundle, sample);
       }
 
-      float bestTemp = !std::isnan(rowPortTemp) ? rowPortTemp : rowHillTemp;
+      float gust = 0.0f;
+      if (!std::isnan(v[CSV_HILL_GUST])) gust = std::max(gust, v[CSV_HILL_GUST]);
+      if (!std::isnan(v[CSV_PORT_GUST])) gust = std::max(gust, v[CSV_PORT_GUST]);
+      float rain = std::isnan(v[CSV_HILL_RAIN]) ? 0.0f : v[CSV_HILL_RAIN];
+
+      float bestTemp = !std::isnan(v[CSV_PORT_TEMP]) ? v[CSV_PORT_TEMP] : v[CSV_HILL_TEMP];
       if (!std::isnan(bestTemp))
       {
-        bundle.history[diffDays].temp_min = std::min(bundle.history[diffDays].temp_min, bestTemp);
-        bundle.history[diffDays].temp_max = std::max(bundle.history[diffDays].temp_max, bestTemp);
-        bundle.history[diffDays].rain_total = std::max(bundle.history[diffDays].rain_total, std::max(rowHillRain, rowPortRain));
-        bundle.history[diffDays].wind_max_kts = std::max(bundle.history[diffDays].wind_max_kts, rowWindGust);
-        bundle.history[diffDays].has_data = true;
+        daily_summary_t &d = bundle.history[diffDays];
+        d.temp_min = std::min(d.temp_min, bestTemp);
+        d.temp_max = std::max(d.temp_max, bestTemp);
+        d.rain_total = std::max(d.rain_total, rain);
+        d.wind_max_kts = std::max(d.wind_max_kts, gust);
+        d.has_data = true;
       }
     }
+    f.close();
   }
-  f.close();
 
   // Clean up any slots that had no data
   for (int i = 0; i < 5; ++i)
