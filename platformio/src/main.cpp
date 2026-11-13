@@ -108,47 +108,67 @@ bool readIndoorSensor(float &inTemp, float &inHumidity)
   return sensorFound && !std::isnan(inTemp) && !std::isnan(inHumidity);
 }
 
+// If the clock has never been set (cold boot and no NTP sync), wake again
+// after this many seconds instead of trusting the 1970 time for alignment.
+static const uint64_t UNSYNCED_RETRY_SECONDS = 5 * 60;
+
+// Any epoch before this means the RTC was never synchronised.
+static const time_t MIN_VALID_EPOCH = 1700000000; // 2023-11-14
+
 /* Put esp32 into ultra low-power deep sleep (<11μA).
  * Aligns wake time to the minute. Configures hardware button interrupts.
  */
 void beginDeepSleep(unsigned long startTime, tm *timeInfo)
 {
-  if (!getLocalTime(timeInfo))
+  // Short timeout: the default (5 s) just burns battery when the clock was
+  // never set, it cannot become valid while we wait here.
+  if (!getLocalTime(timeInfo, 10))
   {
     Serial.println(TXT_REFERENCING_OLDER_TIME_NOTICE);
   }
 
-  int bedtimeHour = INT_MAX;
-  if (BED_TIME != WAKE_TIME)
-  {
-    bedtimeHour = (BED_TIME - WAKE_TIME + 24) % 24;
-  }
-
-  int curHour = (timeInfo->tm_hour - WAKE_TIME + 24) % 24;
-  const int curMinute = curHour * 60 + timeInfo->tm_min;
-  const int curSecond = curHour * 3600 + timeInfo->tm_min * 60 + timeInfo->tm_sec;
-  const int desiredSleepSeconds = SLEEP_DURATION * 60;
-  const int offsetMinutes = curMinute % SLEEP_DURATION;
-  const int offsetSeconds = curSecond % desiredSleepSeconds;
-
-  int sleepMinutes = SLEEP_DURATION - offsetMinutes;
-  if (desiredSleepSeconds - offsetSeconds < 120
-   || offsetSeconds / (float)desiredSleepSeconds > 0.95f)
-  {
-    sleepMinutes += SLEEP_DURATION;
-  }
-
-  const int predictedWakeHour = ((curMinute + sleepMinutes) / 60) % 24;
-
   uint64_t sleepDuration;
-  if (predictedWakeHour < bedtimeHour)
+  if (time(nullptr) < MIN_VALID_EPOCH)
   {
-    sleepDuration = sleepMinutes * 60 - timeInfo->tm_sec;
+    // After a reset the clock starts at 1970-01-01 00:00 UTC (01:00 CET),
+    // which falls inside bed time and would put the display to sleep until
+    // WAKE_TIME, i.e. for hours. Retry soon instead.
+    Serial.println("[Sleep] Time never synchronised, retrying soon");
+    sleepDuration = UNSYNCED_RETRY_SECONDS;
   }
   else
   {
-    const int hoursUntilWake = 24 - curHour;
-    sleepDuration = hoursUntilWake * 3600ULL - (timeInfo->tm_min * 60ULL + timeInfo->tm_sec);
+    int bedtimeHour = INT_MAX;
+    if (BED_TIME != WAKE_TIME)
+    {
+      bedtimeHour = (BED_TIME - WAKE_TIME + 24) % 24;
+    }
+
+    int curHour = (timeInfo->tm_hour - WAKE_TIME + 24) % 24;
+    const int curMinute = curHour * 60 + timeInfo->tm_min;
+    const int curSecond = curHour * 3600 + timeInfo->tm_min * 60 + timeInfo->tm_sec;
+    const int desiredSleepSeconds = SLEEP_DURATION * 60;
+    const int offsetMinutes = curMinute % SLEEP_DURATION;
+    const int offsetSeconds = curSecond % desiredSleepSeconds;
+
+    int sleepMinutes = SLEEP_DURATION - offsetMinutes;
+    if (desiredSleepSeconds - offsetSeconds < 120
+     || offsetSeconds / (float)desiredSleepSeconds > 0.95f)
+    {
+      sleepMinutes += SLEEP_DURATION;
+    }
+
+    const int predictedWakeHour = ((curMinute + sleepMinutes) / 60) % 24;
+
+    if (predictedWakeHour < bedtimeHour)
+    {
+      sleepDuration = sleepMinutes * 60 - timeInfo->tm_sec;
+    }
+    else
+    {
+      const int hoursUntilWake = 24 - curHour;
+      sleepDuration = hoursUntilWake * 3600ULL - (timeInfo->tm_min * 60ULL + timeInfo->tm_sec);
+    }
   }
 
   sleepDuration += 3ULL;
@@ -236,7 +256,7 @@ void setup()
     }
 
     tm timeInfo = {};
-    getLocalTime(&timeInfo);
+    getLocalTime(&timeInfo, 10);
 
     renderWeatherBundle(rtc_bundle, timeInfo);
     beginDeepSleep(startTime, &timeInfo);
@@ -394,7 +414,7 @@ void setup()
     Serial.println("[WiFi] Connection failed. Entering OFFLINE mode with cached data.");
     killWiFi();
     rtc_bundle.is_offline = true;
-    getLocalTime(&timeInfo);
+    getLocalTime(&timeInfo, 10);
   }
 
   // Render display (never blanks screen, shows cached data with OFFLINE badge if disconnected)
