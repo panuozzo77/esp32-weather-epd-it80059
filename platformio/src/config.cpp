@@ -110,8 +110,8 @@ const String OWM_ONECALL_VERSION = "3.0";
 // LOCATION
 // Set your latitude and longitude.
 // (used to get weather data as part of API requests to OpenWeatherMap)
-const String LAT = "40.7128";
-const String LON = "-74.0060";
+const String LAT = "40.7869"; // Torre del Greco (NA)
+const String LON = "14.3681";
 // City name that will be shown in the top-right corner of the display.
 const String CITY_STRING = "Torre del Greco, Napoli";
 

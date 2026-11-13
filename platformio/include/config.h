@@ -166,7 +166,7 @@
 // Use local OpenWeatherMap sample data instead of making One Call and Air
 // Pollution API requests. Useful for display testing when no valid API key is
 // available.
-#define USE_OPENWEATHER_MOCK_DATA
+// #define USE_OPENWEATHER_MOCK_DATA
 
 // WIND DIRECTION INDICATOR
 // Choose whether the wind direction indicator should be an arrow, number, or
