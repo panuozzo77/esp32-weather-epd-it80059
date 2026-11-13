@@ -292,6 +292,15 @@ void setup()
     loadLatestWeather(rtc_bundle);
   }
 
+  // Read the internal AHT20 sensor before anything is logged/cached, so the
+  // SD log and 24h trend get this cycle's value (and before WiFi warms the board).
+  float inTemp = NAN, inHumidity = NAN;
+  bool sensorFound = readIndoorSensor(inTemp, inHumidity);
+  rtc_bundle.indoor.temp     = inTemp;
+  rtc_bundle.indoor.humidity = inHumidity;
+  rtc_bundle.indoor.valid    = sensorFound;
+  rtc_bundle.battery_mv      = batteryVoltage;
+
   tm timeInfo = {};
   int wifiRSSI = 0;
   wl_status_t wifiStatus = startWiFi(wifiRSSI);
@@ -349,14 +358,6 @@ void setup()
     rtc_bundle.is_offline = true;
     getLocalTime(&timeInfo);
   }
-
-  // Read Internal AHT20 Sensor
-  float inTemp = NAN, inHumidity = NAN;
-  bool sensorFound = readIndoorSensor(inTemp, inHumidity);
-  rtc_bundle.indoor.temp     = inTemp;
-  rtc_bundle.indoor.humidity = inHumidity;
-  rtc_bundle.indoor.valid    = sensorFound;
-  rtc_bundle.battery_mv      = batteryVoltage;
 
   // Render display (never blanks screen, shows cached data with OFFLINE badge if disconnected)
   renderWeatherBundle(rtc_bundle, timeInfo);
