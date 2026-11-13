@@ -169,6 +169,12 @@ void setup()
 
   disableBuiltinLED();
 
+  // The RTC keeps counting through deep sleep, but the TZ environment
+  // variable lives in RAM and is lost. Re-apply it so the button fast path
+  // and the offline path (which never call configTzTime) use local time.
+  setenv("TZ", TIMEZONE, 1);
+  tzset();
+
   // 1. Check Wakeup Reason
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
   bool isExt0Wakeup = (wakeup_reason == ESP_SLEEP_WAKEUP_EXT0);
