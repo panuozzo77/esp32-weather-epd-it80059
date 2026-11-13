@@ -51,6 +51,13 @@
   static const uint16_t OWM_PORT = 443;
 #endif
 
+// Access point (BSSID) and channel of the last successful connection, kept in
+// RTC memory across deep sleep. Connecting directly to them skips the full
+// channel scan (faster, less battery) and keeps the ESP32 on the same 2.4 GHz
+// radio. Cleared automatically on reset/power loss.
+RTC_DATA_ATTR static uint8_t rtcWiFiBssid[6];
+RTC_DATA_ATTR static int32_t rtcWiFiChannel = 0;
+
 // Last STA disconnect reason reported by the WiFi driver (0 = none).
 static volatile uint8_t lastDisconnectReason = 0;
 
@@ -128,15 +135,32 @@ wl_status_t startWiFi(int &wifiRSSI)
   }
 
   Serial.printf("%s '%s'", TXT_CONNECTING_TO, WIFI_SSID);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  wl_status_t connection_status = waitForConnection(WIFI_TIMEOUT);
+  const bool useCachedAp = rtcWiFiChannel > 0;
+  if (useCachedAp)
+  {
+    Serial.printf(" (cached AP %02X:%02X:%02X:%02X:%02X:%02X ch %d)",
+                  rtcWiFiBssid[0], rtcWiFiBssid[1], rtcWiFiBssid[2],
+                  rtcWiFiBssid[3], rtcWiFiBssid[4], rtcWiFiBssid[5],
+                  (int)rtcWiFiChannel);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD, rtcWiFiChannel, rtcWiFiBssid);
+  }
+  else
+  {
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  }
+  // With a cached AP a connection normally takes < 1 s; if the router moved
+  // to another channel don't wait the full timeout before rescanning.
+  wl_status_t connection_status =
+    waitForConnection(useCachedAp ? WIFI_TIMEOUT / 2 : WIFI_TIMEOUT);
 
   if (connection_status != WL_CONNECTED)
   {
     // Routers with band steering or a busy WPA2/WPA3 handshake often refuse
-    // the first attempt and accept the next one. Reset the driver and retry.
+    // the first attempt and accept the next one. Reset the driver and retry
+    // with a full scan (the cached AP/channel may be stale).
     Serial.printf("[WiFi] Attempt 1 failed (status=%d, reason=%u), retrying\n",
                   (int)connection_status, lastDisconnectReason);
+    rtcWiFiChannel = 0;
     WiFi.disconnect(true);
     delay(200);
     WiFi.mode(WIFI_STA);
@@ -149,6 +173,15 @@ wl_status_t startWiFi(int &wifiRSSI)
   {
     wifiRSSI = WiFi.RSSI(); // get WiFi signal strength now, because the WiFi
                             // will be turned off to save power!
+    // Remember this AP for a fast reconnect on the next wake-up.
+    const uint8_t *bssid = WiFi.BSSID();
+    if (bssid)
+    {
+      memcpy(rtcWiFiBssid, bssid, sizeof(rtcWiFiBssid));
+      rtcWiFiChannel = WiFi.channel();
+    }
+    Serial.printf("[WiFi] Connected to %s on channel %d, RSSI %d dBm\n",
+                  WiFi.BSSIDstr().c_str(), (int)WiFi.channel(), wifiRSSI);
     Serial.println("IP: " + WiFi.localIP().toString() + " Gateway: " + WiFi.gatewayIP().toString());
     // Keep the DHCP-provided DNS (works on networks that block external DNS),
     // but fall back to public resolvers if it cannot resolve anything.
