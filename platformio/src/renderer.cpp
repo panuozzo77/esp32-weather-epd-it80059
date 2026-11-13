@@ -2425,30 +2425,47 @@ void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo)
   drawString(236, 259, astroBuf, LEFT, GxEPD_RED);
 }
 
-// Screen 1: Historical Summary (Past 4 Days + Today from SD) & 24h Trend
+// Draws a 2 px thick line. When dashOn > 0 the line is dashed (dashOn pixels
+// drawn, dashOff skipped); `phase` carries the pattern across segments.
+static void drawTrendLine(int x0, int y0, int x1, int y1, uint16_t color,
+                          int dashOn, int dashOff, int &phase)
+{
+  const int dx = x1 - x0, dy = y1 - y0;
+  const int steps = std::max(std::abs(dx), std::abs(dy));
+  for (int k = 0; k <= steps; ++k)
+  {
+    const int x = steps ? x0 + (dx * k) / steps : x0;
+    const int y = steps ? y0 + (dy * k) / steps : y0;
+    bool on = true;
+    if (dashOn > 0)
+    {
+      on = (phase % (dashOn + dashOff)) < dashOn;
+      if (k < steps) ++phase; // the shared endpoint is counted once
+    }
+    if (on)
+    {
+      display.drawPixel(x, y, color);
+      display.drawPixel(x, y + 1, color);
+    }
+  }
+}
+
+// Screen 1: Historical Summary (Past 4 Days + Today from SD) & 24h Trend.
+// No header or status bar, so the chart gets most of the screen.
 void drawScreen1_History(const weather_bundle_t &bundle, const tm &timeInfo)
 {
-  // 1. Header
-  display.setFont(&FONT_9pt8b);
-  drawString(8, 16, "STORICO METEO & TREND 24H", LEFT, GxEPD_RED);
+  // 1. Table: past days summary (y = 2 to 107)
+  display.drawRect(6, 2, 388, 18, GxEPD_BLACK);
   display.setFont(&FONT_6pt8b);
-  drawString(8, 28, "Dati aggregati da scheda SD", LEFT, GxEPD_BLACK);
-  drawString(DISP_WIDTH - 8, 24, "Torre del Greco", RIGHT, GxEPD_BLACK);
-  display.drawLine(6, 33, DISP_WIDTH - 6, 33, GxEPD_BLACK);
+  drawString(12, 15, "Giorno", LEFT, GxEPD_BLACK);
+  drawString(110, 15, "T. Min", CENTER, GxEPD_BLACK);
+  drawString(180, 15, "T. Max", CENTER, GxEPD_BLACK);
+  drawString(260, 15, "Pioggia", CENTER, GxEPD_BLACK);
+  drawString(345, 15, "Raffica Max", CENTER, GxEPD_BLACK);
 
-  // 2. Table: Past Days Summary (Y = 38 to 142)
-  display.drawRect(6, 37, 388, 18, GxEPD_BLACK);
-  display.setFont(&FONT_6pt8b);
-  drawString(12, 49, "Giorno", LEFT, GxEPD_BLACK);
-  drawString(110, 49, "T. Min", CENTER, GxEPD_BLACK);
-  drawString(180, 49, "T. Max", CENTER, GxEPD_BLACK);
-  drawString(260, 49, "Pioggia", CENTER, GxEPD_BLACK);
-  drawString(345, 49, "Raffica Max", CENTER, GxEPD_BLACK);
-
-  int rowY = 58;
+  int rowY = 20;
   for (int i = 0; i < 5; ++i)
   {
-    display.setFont(&FONT_6pt8b);
     char dayLabel[24];
     if (i == 0) snprintf(dayLabel, sizeof(dayLabel), "Oggi (%s)", bundle.history[i].date_str);
     else if (i == 1) snprintf(dayLabel, sizeof(dayLabel), "Ieri (%s)", bundle.history[i].date_str);
@@ -2481,102 +2498,153 @@ void drawScreen1_History(const weather_bundle_t &bundle, const tm &timeInfo)
     rowY += 17;
   }
 
-  // 3. 24h Trend Chart (Y = 146 to 270)
-  display.setFont(&FONT_6pt8b);
-  drawString(8, 154, "Curva Temp. 24h:", LEFT, GxEPD_BLACK);
-  drawString(125, 154, "- Porto", LEFT, GxEPD_BLACK);
-  drawString(195, 154, "- Collina", LEFT, GxEPD_RED);
-  drawString(275, 154, "-- Casa", LEFT, GxEPD_BLACK);
+  // 2. Legend (y ~ 120)
+  const int legY = 121;
+  int lx = 8;
+  int phase = 0;
+  drawString(lx, legY, "Temp. 24h", LEFT, GxEPD_BLACK);
+  lx += 70;
+  drawTrendLine(lx, legY - 4, lx + 18, legY - 4, GxEPD_BLACK, 0, 0, phase);
+  drawString(lx + 22, legY, "Porto", LEFT, GxEPD_BLACK);
+  lx += 64;
+  drawTrendLine(lx, legY - 4, lx + 18, legY - 4, GxEPD_RED, 0, 0, phase);
+  drawString(lx + 22, legY, "Collina", LEFT, GxEPD_RED);
+  lx += 72;
+  phase = 0;
+  drawTrendLine(lx, legY - 4, lx + 18, legY - 4, GxEPD_BLACK, 4, 3, phase);
+  drawString(lx + 22, legY, "Casa", LEFT, GxEPD_BLACK);
 
-  const int graphX0 = 36;
+  // Sync / offline time, since the status bar is hidden on this page.
+  display.setFont(&FONT_5pt8b);
+  {
+    char syncBuf[32];
+    tm syncTm;
+    time_t syncEpoch = bundle.last_sync_epoch;
+    localtime_r(&syncEpoch, &syncTm);
+    snprintf(syncBuf, sizeof(syncBuf), "%s %02d:%02d",
+             bundle.is_offline ? "OFFLINE" : "Agg.", syncTm.tm_hour, syncTm.tm_min);
+    drawString(DISP_WIDTH - 8, legY, syncBuf, RIGHT,
+               bundle.is_offline ? GxEPD_RED : GxEPD_BLACK);
+  }
+
+  // 3. 24h trend chart: time on the x axis, last 24 hours ending now.
+  const int graphX0 = 32;
   const int graphX1 = 390;
-  const int graphY0 = 164;
-  const int graphY1 = 265;
+  const int graphY0 = 130;
+  const int graphY1 = 282;
+  const time_t tEnd   = mktime(const_cast<tm *>(&timeInfo));
+  const time_t tStart = tEnd - 24 * 3600;
+  // Samples further apart than this are not joined (missed refreshes).
+  const time_t MAX_JOIN_GAP = 90 * 60;
 
+  // Range over all three series.
+  float vMin = 999.0f, vMax = -999.0f;
+  int plotted = 0;
+  for (int i = 0; i < bundle.trend_count; ++i)
+  {
+    const hourly_sample_t &s = bundle.trend_24h[i];
+    if (s.timestamp < tStart || s.timestamp > tEnd + 600) continue;
+    const float vals[3] = { s.port_temp, s.hill_temp, s.indoor_temp };
+    for (float v : vals)
+    {
+      if (std::isnan(v) || v < -40.0f || v > 60.0f) continue;
+      vMin = std::min(vMin, v);
+      vMax = std::max(vMax, v);
+      ++plotted;
+    }
+  }
+  if (plotted == 0) { vMin = 14.0f; vMax = 24.0f; }
+
+  // Round the range to a "nice" step so there are 4-8 labelled grid lines.
+  const float span = vMax - vMin;
+  const int step = span <= 5.0f ? 1 : span <= 12.0f ? 2 : span <= 28.0f ? 5 : 10;
+  const float gMin = std::floor((vMin - 0.5f) / step) * step;
+  float gMax = std::ceil((vMax + 0.5f) / step) * step;
+  if (gMax <= gMin) gMax = gMin + step;
+
+  auto xOf = [&](time_t t) {
+    if (t < tStart) t = tStart;
+    if (t > tEnd) t = tEnd;
+    return graphX0 + (int)((double)(t - tStart) * (graphX1 - graphX0) / (double)(tEnd - tStart));
+  };
+  auto yOf = [&](float v) {
+    int y = graphY1 - (int)std::lround((v - gMin) / (gMax - gMin) * (graphY1 - graphY0));
+    return std::max(graphY0, std::min(graphY1, y));
+  };
+
+  // Horizontal grid + temperature labels
+  display.setFont(&FONT_5pt8b);
+  for (float v = gMin; v <= gMax + 0.01f; v += step)
+  {
+    const int y = yOf(v);
+    char lbl[12];
+    snprintf(lbl, sizeof(lbl), "%.0f\260", v);
+    drawString(graphX0 - 4, y + 3, lbl, RIGHT, GxEPD_BLACK);
+    if (y != graphY1)
+      for (int x = graphX0 + 2; x < graphX1; x += 4)
+        display.drawPixel(x, y, GxEPD_BLACK);
+  }
+
+  // Vertical grid + hour labels every 3 hours (local time).
+  for (time_t t = (tStart / 3600 + 1) * 3600; t <= tEnd; t += 3600)
+  {
+    tm h;
+    localtime_r(&t, &h);
+    if (h.tm_hour % 3 != 0) continue;
+    const int x = xOf(t);
+    for (int y = graphY0; y < graphY1; y += 4)
+      display.drawPixel(x, y, GxEPD_BLACK);
+    display.drawLine(x, graphY1, x, graphY1 + 3, GxEPD_BLACK);
+    char lbl[8];
+    snprintf(lbl, sizeof(lbl), "%02d:00", h.tm_hour);
+    // keep the last label inside the screen
+    const int lblX = std::min(x, DISP_WIDTH - 2 - (int)getStringWidth(lbl) / 2);
+    drawString(lblX, DISP_HEIGHT - 6, lbl, CENTER,
+               h.tm_hour == 0 ? GxEPD_RED : GxEPD_BLACK);
+  }
+
+  // Axes
   display.drawLine(graphX0, graphY1, graphX1, graphY1, GxEPD_BLACK);
   display.drawLine(graphX0, graphY0, graphX0, graphY1, GxEPD_BLACK);
 
-  // Scan min & max of trend points
-  float gMin = 999.0f;
-  float gMax = -999.0f;
-  for (int i = 0; i < bundle.trend_count; ++i)
-  {
-    if (!std::isnan(bundle.trend_24h[i].port_temp))
-    {
-      gMin = std::min(gMin, bundle.trend_24h[i].port_temp);
-      gMax = std::max(gMax, bundle.trend_24h[i].port_temp);
-    }
-    if (!std::isnan(bundle.trend_24h[i].hill_temp))
-    {
-      gMin = std::min(gMin, bundle.trend_24h[i].hill_temp);
-      gMax = std::max(gMax, bundle.trend_24h[i].hill_temp);
-    }
-  }
-
-  if (gMin > 900.0f) { gMin = 14.0f; gMax = 24.0f; }
-  gMin = std::floor(gMin - 1.0f);
-  gMax = std::ceil(gMax + 1.0f);
-  if (gMax <= gMin) gMax = gMin + 5.0f;
-
-  // Y-axis labels and grid lines
-  display.setFont(&FONT_5pt8b);
-  char minLbl[12], maxLbl[12], midLbl[12];
-  snprintf(maxLbl, sizeof(maxLbl), "%.0f\260", gMax);
-  snprintf(minLbl, sizeof(minLbl), "%.0f\260", gMin);
-  snprintf(midLbl, sizeof(midLbl), "%.0f\260", (gMin + gMax) / 2.0f);
-  drawString(graphX0 - 4, graphY0 + 4, maxLbl, RIGHT, GxEPD_BLACK);
-  drawString(graphX0 - 4, (graphY0 + graphY1) / 2 + 3, midLbl, RIGHT, GxEPD_BLACK);
-  drawString(graphX0 - 4, graphY1, minLbl, RIGHT, GxEPD_BLACK);
-
-  // Dotted mid line
-  int midY = (graphY0 + graphY1) / 2;
-  for (int x = graphX0; x < graphX1; x += 4)
-  {
-    display.drawPixel(x, midY, GxEPD_BLACK);
-  }
-
-  // Plot samples
-  if (bundle.trend_count > 1)
-  {
-    float xStep = (float)(graphX1 - graphX0) / (float)(bundle.trend_count - 1);
-    for (int i = 0; i < bundle.trend_count - 1; ++i)
-    {
-      int xA = (int)(graphX0 + i * xStep);
-      int xB = (int)(graphX0 + (i + 1) * xStep);
-
-      // 1. Port temp (Black)
-      if (!std::isnan(bundle.trend_24h[i].port_temp) && !std::isnan(bundle.trend_24h[i + 1].port_temp))
-      {
-        int yA = graphY1 - (int)(((bundle.trend_24h[i].port_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].port_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        display.drawLine(xA, yA, xB, yB, GxEPD_BLACK);
-        display.drawLine(xA, yA + 1, xB, yB + 1, GxEPD_BLACK);
-      }
-
-      // 2. Hill temp (Red)
-      if (!std::isnan(bundle.trend_24h[i].hill_temp) && !std::isnan(bundle.trend_24h[i + 1].hill_temp))
-      {
-        int yA = graphY1 - (int)(((bundle.trend_24h[i].hill_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].hill_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        display.drawLine(xA, yA, xB, yB, GxEPD_RED);
-        display.drawLine(xA, yA + 1, xB, yB + 1, GxEPD_RED);
-      }
-
-      // 3. Indoor temp (Dotted black)
-      if (!std::isnan(bundle.trend_24h[i].indoor_temp) && !std::isnan(bundle.trend_24h[i + 1].indoor_temp))
-      {
-        int yA = graphY1 - (int)(((bundle.trend_24h[i].indoor_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        int yB = graphY1 - (int)(((bundle.trend_24h[i + 1].indoor_temp - gMin) / (gMax - gMin)) * (graphY1 - graphY0));
-        display.drawPixel(xA, yA, GxEPD_BLACK);
-        display.drawPixel((xA + xB) / 2, (yA + yB) / 2, GxEPD_BLACK);
-      }
-    }
-  }
-  else
+  if (plotted == 0)
   {
     display.setFont(&FONT_7pt8b);
     drawString((graphX0 + graphX1) / 2, (graphY0 + graphY1) / 2,
                "Registrazione trend in corso...", CENTER, GxEPD_BLACK);
+    return;
+  }
+
+  // Series: 0 = port (black), 1 = hill (red), 2 = indoor (black dashed)
+  for (int series = 0; series < 3; ++series)
+  {
+    const uint16_t color = (series == 1) ? GxEPD_RED : GxEPD_BLACK;
+    const int dashOn  = (series == 2) ? 4 : 0;
+    const int dashOff = (series == 2) ? 3 : 0;
+    int ph = 0;
+    int prevIdx = -1;
+    for (int i = 0; i < bundle.trend_count; ++i)
+    {
+      const hourly_sample_t &s = bundle.trend_24h[i];
+      const float v = series == 0 ? s.port_temp : series == 1 ? s.hill_temp : s.indoor_temp;
+      if (s.timestamp < tStart || s.timestamp > tEnd + 600 ||
+          std::isnan(v) || v < -40.0f || v > 60.0f)
+        continue;
+
+      const int x = xOf(s.timestamp), y = yOf(v);
+      if (prevIdx >= 0 &&
+          s.timestamp - bundle.trend_24h[prevIdx].timestamp <= MAX_JOIN_GAP)
+      {
+        const hourly_sample_t &p = bundle.trend_24h[prevIdx];
+        const float pv = series == 0 ? p.port_temp : series == 1 ? p.hill_temp : p.indoor_temp;
+        drawTrendLine(xOf(p.timestamp), yOf(pv), x, y, color, dashOn, dashOff, ph);
+      }
+      else
+      {
+        display.fillRect(x - 1, y - 1, 3, 3, color); // isolated point
+      }
+      prevIdx = i;
+    }
   }
 }
 
@@ -2739,8 +2807,12 @@ void renderWeatherBundle(const weather_bundle_t &bundle, const tm &timeInfo)
       drawScreen2_Nautical(bundle, timeInfo);
     }
 
-    drawPageIndicator(bundle.current_page);
-    drawCustomStatusBar(bundle, timeInfo);
+    // The history page uses the full screen for its chart.
+    if (bundle.current_page != 1)
+    {
+      drawPageIndicator(bundle.current_page);
+      drawCustomStatusBar(bundle, timeInfo);
+    }
   } while (display.nextPage());
   powerOffDisplay();
 }
