@@ -334,12 +334,26 @@ void setup()
     populateTodayForecastFromOWM(&owm_onecall, rtc_bundle.today);
 #else
     {
-      WiFiClientSecure secureClient3;
-      secureClient3.setInsecure();
-      int rxStatus = getOWMonecall(secureClient3, owm_onecall);
+      // Follow the transport selected in config.h (USE_HTTP /
+      // USE_HTTPS_NO_CERT_VERIF / USE_HTTPS_WITH_CERT_VERIF).
+#if defined(USE_HTTP)
+      WiFiClient owmClient;
+#elif defined(USE_HTTPS_NO_CERT_VERIF)
+      WiFiClientSecure owmClient;
+      owmClient.setInsecure();
+#elif defined(USE_HTTPS_WITH_CERT_VERIF)
+      WiFiClientSecure owmClient;
+      owmClient.setCACert(cert_Sectigo_Public_Server_Authentication_Root_R46);
+#endif
+      int rxStatus = getOWMonecall(owmClient, owm_onecall);
       if (rxStatus == HTTP_CODE_OK)
       {
         populateTodayForecastFromOWM(&owm_onecall, rtc_bundle.today);
+      }
+      else
+      {
+        Serial.printf("[OWM] One Call %s failed: %d %s\n", OWM_ONECALL_VERSION.c_str(),
+                      rxStatus, getHttpResponsePhrase(rxStatus));
       }
     }
 #endif
