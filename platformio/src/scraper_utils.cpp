@@ -14,282 +14,11 @@ static const uint16_t SCRAPER_CONNECT_TIMEOUT_MS = 8000;
 static const uint16_t SCRAPER_READ_TIMEOUT_MS    = 10000;
 static const size_t   SCRAPER_MAX_BYTES          = 400 * 1024;
 
+static const char *CAMPANIALIVE_HOST = "www.campanialive.it";
+static const char *CAMPANIALIVE_PATH = "/dati-meteo.asp?stazione=torredelgreco";
+
 static const char *LEGANAVALE_HOST = "www.leganavaletorredelgreco.it";
 static const char *LEGANAVALE_PATH = "/meteo/";
-
-// Helper: skips non-numeric characters until digit or '-' or '+'
-static bool skipToNumber(Stream &s, unsigned long timeoutMs = 2000)
-{
-  unsigned long start = millis();
-  while (millis() - start < timeoutMs)
-  {
-    if (!s.available())
-    {
-      delay(2);
-      continue;
-    }
-    int c = s.peek();
-    if ((c >= '0' && c <= '9') || c == '-' || c == '+')
-    {
-      return true;
-    }
-    s.read(); // discard
-  }
-  return false;
-}
-
-// Helper: reads a floating-point number, replacing ',' with '.'
-static float readFloatFromStream(Stream &s, unsigned long timeoutMs = 1500)
-{
-  if (!skipToNumber(s, timeoutMs)) return NAN;
-
-  char buf[16];
-  int idx = 0;
-  bool hasDot = false;
-  unsigned long start = millis();
-
-  while (idx < (int)sizeof(buf) - 1 && (millis() - start < timeoutMs))
-  {
-    if (!s.available())
-    {
-      delay(2);
-      continue;
-    }
-    int c = s.peek();
-    if ((c >= '0' && c <= '9') || c == '-' || c == '+')
-    {
-      buf[idx++] = (char)s.read();
-    }
-    else if ((c == '.' || c == ',') && !hasDot)
-    {
-      buf[idx++] = '.';
-      hasDot = true;
-      s.read();
-    }
-    else
-    {
-      break;
-    }
-  }
-  buf[idx] = '\0';
-  return (idx > 0) ? (float)atof(buf) : NAN;
-}
-
-// Helper: reads an integer from stream
-static int readIntFromStream(Stream &s, unsigned long timeoutMs = 1500)
-{
-  float val = readFloatFromStream(s, timeoutMs);
-  return std::isnan(val) ? 0 : (int)std::round(val);
-}
-
-// Helper: reads a word (letters only) from stream, e.g. "SW", "ESE", "NNE"
-static bool readWordFromStream(Stream &s, char *out, size_t outSize, unsigned long timeoutMs = 1500)
-{
-  if (!out || outSize == 0) return false;
-  out[0] = '\0';
-
-  unsigned long start = millis();
-  // Skip non-letters
-  while (millis() - start < timeoutMs)
-  {
-    if (!s.available())
-    {
-      delay(2);
-      continue;
-    }
-    int c = s.peek();
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
-    {
-      break;
-    }
-    s.read();
-  }
-
-  size_t idx = 0;
-  while (idx < outSize - 1 && (millis() - start < timeoutMs))
-  {
-    if (!s.available())
-    {
-      delay(2);
-      continue;
-    }
-    int c = s.peek();
-    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'))
-    {
-      out[idx++] = (char)s.read();
-    }
-    else
-    {
-      break;
-    }
-  }
-  out[idx] = '\0';
-  return idx > 0;
-}
-
-// Scrape Campania Live
-bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
-{
-  Serial.println("[Scraper] Connecting to Campania Live (Torre del Greco 154m)...");
-  client.setTimeout(8000);
-
-  // Resolve hostname with fallback IP to bypass local router DNS issues
-  IPAddress serverIP;
-  if (!WiFi.hostByName("www.campanialive.it", serverIP))
-  {
-    Serial.println("[Scraper] DNS fallback for www.campanialive.it -> 31.11.35.175");
-    serverIP.fromString("31.11.35.175");
-  }
-  else
-  {
-    Serial.printf("[Scraper] Resolved www.campanialive.it -> %s\n", serverIP.toString().c_str());
-  }
-
-  if (!client.connect(serverIP, 80))
-  {
-    Serial.println("[Scraper] Failed to connect to www.campanialive.it (port 80)");
-    hill.valid = false;
-    return false;
-  }
-
-  // Send HTTP GET request with standard browser headers
-  client.print("GET /dati-meteo.asp?stazione=torredelgreco HTTP/1.1\r\n"
-               "Host: www.campanialive.it\r\n"
-               "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36\r\n"
-               "Accept: text/html,application/xhtml+xml\r\n"
-               "Connection: close\r\n\r\n");
-  client.flush();
-
-  unsigned long timeout = millis() + 8000;
-  while (client.connected() && !client.available() && millis() < timeout)
-  {
-    delay(10);
-  }
-
-  if (!client.available())
-  {
-    Serial.println("[Scraper] Campania Live response timeout");
-    client.stop();
-    hill.valid = false;
-    return false;
-  }
-
-  String statusLine = client.readStringUntil('\n');
-  if (statusLine.indexOf("200") < 0)
-  {
-    Serial.println("[Scraper] Campania Live non-200 HTTP status: " + statusLine);
-    client.stop();
-    hill.valid = false;
-    return false;
-  }
-
-  // Skip headers until empty line (\r\n\r\n)
-  while (client.connected())
-  {
-    String header = client.readStringUntil('\n');
-    if (header == "\r" || header.isEmpty()) break;
-  }
-
-  client.setTimeout(6000);
-
-  hill.temp = NAN;
-  hill.temp_min = NAN;
-  hill.temp_max = NAN;
-  hill.humidity = 0;
-  hill.pressure = 0.0f;
-  hill.wind_kts = 0.0f;
-  hill.wind_gust_kts = 0.0f;
-  hill.rain_today = 0.0f;
-  strlcpy(hill.wind_dir, "--", sizeof(hill.wind_dir));
-
-  // Helper lambda to skip <font color="..."> tag opening within the current table row
-  auto skipToValue = [&client]() {
-    if (client.findUntil((char *)"<font", (char *)"</tr>"))
-    {
-      client.findUntil((char *)">", (char *)"</tr>");
-    }
-  };
-
-  // 1. Temperatura attuale
-  if (client.find("Temperatura attuale"))
-  {
-    skipToValue();
-    hill.temp = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Temp: %.1f °C\n", hill.temp);
-  }
-
-  // 2. Temperatura massima
-  if (client.find("Temperatura massima"))
-  {
-    skipToValue();
-    hill.temp_max = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Temp Max: %.1f °C\n", hill.temp_max);
-  }
-
-  // 3. Temperatura minima
-  if (client.find("Temperatura minima"))
-  {
-    skipToValue();
-    hill.temp_min = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Temp Min: %.1f °C\n", hill.temp_min);
-  }
-
-  // 4. Umidità
-  if (client.find("Umidit"))
-  {
-    skipToValue();
-    hill.humidity = readIntFromStream(client);
-    Serial.printf("[Scraper] Campania Live Hum: %d %%\n", hill.humidity);
-  }
-
-  // 5. Pressione
-  if (client.find("Pressione sul livello"))
-  {
-    skipToValue();
-    hill.pressure = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Press: %.1f hPa\n", hill.pressure);
-  }
-
-  // 6. Vento medio
-  if (client.find("Vento medio"))
-  {
-    skipToValue();
-    hill.wind_kts = readFloatFromStream(client);
-    if (client.find("direz."))
-    {
-      readWordFromStream(client, hill.wind_dir, sizeof(hill.wind_dir));
-    }
-    Serial.printf("[Scraper] Campania Live Wind: %.1f kts, dir: %s\n", hill.wind_kts, hill.wind_dir);
-  }
-
-  // 7. Raffica massima
-  if (client.find("Raffica massima"))
-  {
-    skipToValue();
-    hill.wind_gust_kts = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Gust: %.1f kts\n", hill.wind_gust_kts);
-  }
-
-  // 8. Pioggia oggi
-  if (client.find("Pioggia oggi"))
-  {
-    skipToValue();
-    hill.rain_today = readFloatFromStream(client);
-    Serial.printf("[Scraper] Campania Live Rain: %.1f mm\n", hill.rain_today);
-  }
-
-  client.stop();
-
-  hill.valid = !std::isnan(hill.temp);
-  if (hill.valid)
-  {
-    time_t now = time(nullptr);
-    tm tmInfo;
-    localtime_r(&now, &tmInfo);
-    snprintf(hill.last_update, sizeof(hill.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
-  }
-  return hill.valid;
-}
 
 // Downloads host/path and feeds the body to the extractor until every field
 // has been found (the useful data sits near the top of the page, so most of
@@ -374,6 +103,76 @@ static bool fetchFields(const char *host, const char *path, bool https,
                 host, (unsigned)total, extractor.allFound() ? "yes" : "no");
   http.end();
   return true;
+}
+
+// Scrape Campania Live (Torre del Greco station, 154 m)
+bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
+{
+  (void)client;
+  Serial.println("[Scraper] Connecting to Campania Live (Torre del Greco 154m)...");
+
+  enum { F_TEMP, F_TMAX, F_TMIN, F_HUM, F_PRESS, F_WIND, F_GUST, F_RAIN, F_COUNT };
+  html_field_t f[F_COUNT] = {};
+  f[F_TEMP]  = { "Temperatura attuale<", "<font" };
+  f[F_TMAX]  = { "Temperatura massima<", "<font" };
+  f[F_TMIN]  = { "Temperatura minima<", "<font" };
+  f[F_HUM]   = { "scope=\"row\">Umidit", "<font" };
+  f[F_PRESS] = { "Pressione sul livello del mare<", "<font" };
+  f[F_WIND]  = { "Vento medio ultimi 10 minuti<", "<font" };
+  f[F_GUST]  = { "Raffica massima di oggi<", "<font" };
+  f[F_RAIN]  = { "Pioggia oggi<", "<font" };
+  HtmlFieldExtractor extractor(f, F_COUNT);
+
+  bool ok = fetchFields(CAMPANIALIVE_HOST, CAMPANIALIVE_PATH, false, extractor)
+            && f[F_TEMP].found;
+  if (!ok)
+  {
+    Serial.println("[Scraper] Campania Live: retrying...");
+    delay(1000);
+    ok = fetchFields(CAMPANIALIVE_HOST, CAMPANIALIVE_PATH, false, extractor)
+         && f[F_TEMP].found;
+  }
+
+  hill.temp = NAN;
+  hill.temp_min = NAN;
+  hill.temp_max = NAN;
+  hill.humidity = 0;
+  hill.pressure = 0.0f;
+  hill.wind_kts = 0.0f;
+  hill.wind_gust_kts = 0.0f;
+  hill.rain_today = 0.0f;
+  strlcpy(hill.wind_dir, "--", sizeof(hill.wind_dir));
+
+  float v;
+  if (htmlParseNumber(f[F_TEMP].value, v))  hill.temp = v;
+  if (htmlParseNumber(f[F_TMAX].value, v))  hill.temp_max = v;
+  if (htmlParseNumber(f[F_TMIN].value, v))  hill.temp_min = v;
+  if (htmlParseNumber(f[F_HUM].value, v))   hill.humidity = (int)lroundf(v);
+  if (htmlParseNumber(f[F_PRESS].value, v)) hill.pressure = v;
+  if (htmlParseNumber(f[F_WIND].value, v))  hill.wind_kts = v;
+  if (htmlParseNumber(f[F_GUST].value, v))  hill.wind_gust_kts = v;
+  if (htmlParseNumber(f[F_RAIN].value, v))  hill.rain_today = v;
+  htmlParseWord(f[F_WIND].value, "direz.", hill.wind_dir, sizeof(hill.wind_dir));
+
+  Serial.printf("[Scraper] Campania Live: T %.1f C (%.1f/%.1f), Hum %d %%, "
+                "P %.1f hPa, Wind %.1f kts %s, Gust %.1f kts, Rain %.1f mm\n",
+                hill.temp, hill.temp_min, hill.temp_max, hill.humidity,
+                hill.pressure, hill.wind_kts, hill.wind_dir,
+                hill.wind_gust_kts, hill.rain_today);
+
+  hill.valid = !std::isnan(hill.temp);
+  if (hill.valid)
+  {
+    time_t now = time(nullptr);
+    tm tmInfo;
+    localtime_r(&now, &tmInfo);
+    snprintf(hill.last_update, sizeof(hill.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  }
+  else
+  {
+    Serial.println("[Scraper] Campania Live: temperature not found");
+  }
+  return hill.valid;
 }
 
 // Scrape Lega Navale Torre del Greco (Ecowitt WordPress plugin page)
