@@ -357,6 +357,17 @@ bool updateHistoryAndTrend(weather_bundle_t &bundle, const tm *timeInfo)
   const time_t nowEpoch = mktime(const_cast<tm*>(timeInfo));
   bool trendReset = false;
 
+  // Local midnight of each of the last 5 calendar days (DST-safe).
+  time_t dayStart[5];
+  for (int i = 0; i < 5; ++i)
+  {
+    tm m = *timeInfo;
+    m.tm_mday -= i;
+    m.tm_hour = m.tm_min = m.tm_sec = 0;
+    m.tm_isdst = -1;
+    dayStart[i] = mktime(&m);
+  }
+
   // The last 5 days can span the previous month's file.
   for (int back = (timeInfo->tm_mday <= 5) ? 1 : 0; back >= 0; --back)
   {
@@ -388,8 +399,9 @@ bool updateHistoryAndTrend(weather_bundle_t &bundle, const tm *timeInfo)
       if (rowEpoch <= 0 || rowEpoch > nowEpoch + 600) continue;
 
       long age = (long)(nowEpoch - rowEpoch);
-      int diffDays = age / 86400;
-      if (diffDays >= 5) continue;
+      int diffDays = 0;
+      while (diffDays < 5 && rowEpoch < dayStart[diffDays]) ++diffDays;
+      if (diffDays >= 5 && age > 86400) continue;
 
       float v[CSV_FIELDS];
       parseCsvFloats(line.c_str(), v, CSV_FIELDS);
@@ -411,7 +423,7 @@ bool updateHistoryAndTrend(weather_bundle_t &bundle, const tm *timeInfo)
       float rain = std::isnan(v[CSV_HILL_RAIN]) ? 0.0f : v[CSV_HILL_RAIN];
 
       float bestTemp = !std::isnan(v[CSV_PORT_TEMP]) ? v[CSV_PORT_TEMP] : v[CSV_HILL_TEMP];
-      if (!std::isnan(bestTemp))
+      if (diffDays < 5 && !std::isnan(bestTemp))
       {
         daily_summary_t &d = bundle.history[diffDays];
         d.temp_min = std::min(d.temp_min, bestTemp);
