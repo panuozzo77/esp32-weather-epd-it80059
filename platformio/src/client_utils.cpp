@@ -51,6 +51,49 @@
   static const uint16_t OWM_PORT = 443;
 #endif
 
+// Last STA disconnect reason reported by the WiFi driver (0 = none).
+static volatile uint8_t lastDisconnectReason = 0;
+
+static void onWiFiDisconnected(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+  (void)event;
+  lastDisconnectReason = info.wifi_sta_disconnected.reason;
+}
+
+/* Logs why the connection failed: the driver's last disconnect reason and
+ * whether the SSID is visible at all (and on which channel / with what RSSI).
+ *   201 NO_AP_FOUND        -> out of range, or 5 GHz only
+ *   15  4WAY_HANDSHAKE_TIMEOUT / 204 HANDSHAKE_TIMEOUT -> wrong password or weak signal
+ *   2   AUTH_EXPIRE, 4 ASSOC_EXPIRE, 17 ASSOC_TOOMANY, 202 AUTH_FAIL
+ *       -> router refused the client (band steering, client limit, WPA3/PMF)
+ */
+static void logWiFiFailure(wl_status_t status)
+{
+  uint8_t reason = lastDisconnectReason;
+  Serial.printf("[WiFi] Failed: status=%d, last disconnect reason=%u (%s)\n",
+                (int)status, reason,
+                reason ? WiFi.disconnectReasonName((wifi_err_reason_t)reason) : "none");
+
+  // Stop the pending connection attempt, otherwise the driver rejects the scan.
+  WiFi.disconnect();
+  int n = WiFi.scanNetworks(false, false, false, 120);
+  bool seen = false;
+  for (int i = 0; i < n; ++i)
+  {
+    if (WiFi.SSID(i) == WIFI_SSID)
+    {
+      seen = true;
+      Serial.printf("[WiFi] '%s' visible: BSSID %s, channel %d, RSSI %d dBm\n",
+                    WIFI_SSID, WiFi.BSSIDstr(i).c_str(), WiFi.channel(i), WiFi.RSSI(i));
+    }
+  }
+  if (!seen)
+  {
+    Serial.printf("[WiFi] '%s' not found on 2.4 GHz (%d networks seen)\n", WIFI_SSID, n);
+  }
+  WiFi.scanDelete();
+}
+
 /* Power-on and connect WiFi.
  * Takes int parameter to store WiFi RSSI, or “Received Signal Strength
  * Indicator"
@@ -60,6 +103,14 @@
 wl_status_t startWiFi(int &wifiRSSI)
 {
   WiFi.mode(WIFI_STA);
+  lastDisconnectReason = 0;
+  static bool handlerRegistered = false;
+  if (!handlerRegistered)
+  {
+    WiFi.onEvent(onWiFiDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+    handlerRegistered = true;
+  }
+
   Serial.printf("%s '%s'", TXT_CONNECTING_TO, WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
@@ -96,6 +147,7 @@ wl_status_t startWiFi(int &wifiRSSI)
   else
   {
     Serial.printf("%s '%s'\n", TXT_COULD_NOT_CONNECT_TO, WIFI_SSID);
+    logWiFiFailure(connection_status);
   }
   return connection_status;
 } // startWiFi
