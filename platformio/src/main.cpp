@@ -248,6 +248,30 @@ void setup()
       } while (display.nextPage());
       powerOffDisplay();
     }
+
+    if (batteryVoltage <= CRIT_LOW_BATTERY_VOLTAGE)
+    { // critically low battery
+      // don't set esp_sleep_enable_timer_wakeup();
+      // We won't wake up again until someone manually presses the RST button.
+      Serial.println(TXT_CRIT_LOW_BATTERY_VOLTAGE);
+      Serial.println(TXT_HIBERNATING_INDEFINITELY_NOTICE);
+    }
+    else if (batteryVoltage <= VERY_LOW_BATTERY_VOLTAGE)
+    { // very low battery
+      esp_sleep_enable_timer_wakeup(VERY_LOW_BATTERY_SLEEP_INTERVAL
+                                    * 60ULL * 1000000ULL);
+      Serial.println(TXT_VERY_LOW_BATTERY_VOLTAGE);
+      Serial.print(TXT_ENTERING_DEEP_SLEEP_FOR);
+      Serial.println(" " + String(VERY_LOW_BATTERY_SLEEP_INTERVAL) + "min");
+    }
+    else
+    { // low battery
+      esp_sleep_enable_timer_wakeup(LOW_BATTERY_SLEEP_INTERVAL
+                                    * 60ULL * 1000000ULL);
+      Serial.println(TXT_LOW_BATTERY_VOLTAGE);
+      Serial.print(TXT_ENTERING_DEEP_SLEEP_FOR);
+      Serial.println(" " + String(LOW_BATTERY_SLEEP_INTERVAL) + "min");
+    }
     esp_deep_sleep_start();
   }
   if (lowBat) prefs.putBool("lowBat", false);
