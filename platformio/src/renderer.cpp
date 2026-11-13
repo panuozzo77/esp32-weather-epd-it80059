@@ -2270,8 +2270,11 @@ void drawScreen0_Dashboard(const weather_bundle_t &bundle, const tm &timeInfo)
 
     display.setFont(&FONT_5pt8b);
     char hSub[40];
-    snprintf(hSub, sizeof(hSub), "Umid. %d%% | %d hPa",
-             bundle.hill.humidity, (int)std::round(bundle.hill.pressure));
+    if (std::isnan(bundle.hill.pressure))
+      snprintf(hSub, sizeof(hSub), "Umid. %d%% | -- hPa", bundle.hill.humidity);
+    else
+      snprintf(hSub, sizeof(hSub), "Umid. %d%% | %d hPa",
+               bundle.hill.humidity, (int)std::round(bundle.hill.pressure));
     drawString(38, 178, hSub, LEFT, GxEPD_BLACK);
 
     char hWind[40];
@@ -2672,7 +2675,12 @@ void drawScreen2_Nautical(const weather_bundle_t &bundle, const tm &timeInfo)
 
   display.drawInvertedBitmap(210, 196, wi_barometer_16x16, 16, 16, GxEPD_BLACK);
   char pPBuf[32];
-  snprintf(pPBuf, sizeof(pPBuf), "Pressione: %.1f hPa", bundle.port.pressure > 800.0f ? bundle.port.pressure : bundle.hill.pressure);
+  const float navPress = !std::isnan(bundle.port.pressure) && bundle.port.pressure > 800.0f
+                        ? bundle.port.pressure : bundle.hill.pressure;
+  if (std::isnan(navPress))
+    snprintf(pPBuf, sizeof(pPBuf), "Pressione: -- hPa");
+  else
+    snprintf(pPBuf, sizeof(pPBuf), "Pressione: %.1f hPa", navPress);
   drawString(232, 208, pPBuf, LEFT, GxEPD_BLACK);
 
   display.drawInvertedBitmap(210, 214, wi_day_sunny_16x16, 16, 16, GxEPD_BLACK);

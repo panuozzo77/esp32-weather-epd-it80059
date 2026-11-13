@@ -105,6 +105,23 @@ static bool fetchFields(const char *host, const char *path, bool https,
   return true;
 }
 
+// Parses a numeric field and checks it against a plausible range, so that a
+// placeholder ("--") or a value grabbed from the wrong place is rejected
+// instead of being shown as e.g. 0 C.
+static bool parseRange(const html_field_t &f, float lo, float hi, float &out)
+{
+  float v;
+  if (!f.found || !htmlParseNumber(f.value, v)) return false;
+  if (v < lo || v > hi)
+  {
+    Serial.printf("[Scraper] Rejecting out-of-range value '%s' for '%s'\n",
+                  f.value, f.anchor);
+    return false;
+  }
+  out = v;
+  return true;
+}
+
 // Scrape Campania Live (Torre del Greco station, 154 m)
 bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
 {
@@ -133,46 +150,46 @@ bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
          && f[F_TEMP].found;
   }
 
-  hill.temp = NAN;
-  hill.temp_min = NAN;
-  hill.temp_max = NAN;
-  hill.humidity = 0;
-  hill.pressure = 0.0f;
-  hill.wind_kts = 0.0f;
-  hill.wind_gust_kts = 0.0f;
-  hill.rain_today = 0.0f;
-  strlcpy(hill.wind_dir, "--", sizeof(hill.wind_dir));
+  // Parse into a scratch copy: on failure the last good values are kept.
+  local_station_t st = hill;
+  st.temp = st.temp_min = st.temp_max = st.feels_like = NAN;
+  st.humidity = 0;
+  st.pressure = NAN;
+  st.wind_kts = st.wind_gust_kts = 0.0f;
+  st.rain_today = 0.0f;
+  strlcpy(st.wind_dir, "--", sizeof(st.wind_dir));
 
   float v;
-  if (htmlParseNumber(f[F_TEMP].value, v))  hill.temp = v;
-  if (htmlParseNumber(f[F_TMAX].value, v))  hill.temp_max = v;
-  if (htmlParseNumber(f[F_TMIN].value, v))  hill.temp_min = v;
-  if (htmlParseNumber(f[F_HUM].value, v))   hill.humidity = (int)lroundf(v);
-  if (htmlParseNumber(f[F_PRESS].value, v)) hill.pressure = v;
-  if (htmlParseNumber(f[F_WIND].value, v))  hill.wind_kts = v;
-  if (htmlParseNumber(f[F_GUST].value, v))  hill.wind_gust_kts = v;
-  if (htmlParseNumber(f[F_RAIN].value, v))  hill.rain_today = v;
-  htmlParseWord(f[F_WIND].value, "direz.", hill.wind_dir, sizeof(hill.wind_dir));
+  if (!ok || !parseRange(f[F_TEMP], -30, 55, st.temp))
+  {
+    Serial.println("[Scraper] Campania Live: no valid temperature, keeping previous data");
+    return false;
+  }
+  parseRange(f[F_TMAX], -30, 55, st.temp_max);
+  parseRange(f[F_TMIN], -30, 55, st.temp_min);
+  if (parseRange(f[F_HUM], 0, 100, v)) st.humidity = (int)lroundf(v);
+  parseRange(f[F_PRESS], 900, 1100, st.pressure);
+  parseRange(f[F_WIND], 0, 150, st.wind_kts);
+  parseRange(f[F_GUST], 0, 200, st.wind_gust_kts);
+  parseRange(f[F_RAIN], 0, 500, st.rain_today);
+  if (!htmlParseWord(f[F_WIND].value, "direz.", st.wind_dir, sizeof(st.wind_dir)))
+  {
+    strlcpy(st.wind_dir, "--", sizeof(st.wind_dir));
+  }
 
   Serial.printf("[Scraper] Campania Live: T %.1f C (%.1f/%.1f), Hum %d %%, "
                 "P %.1f hPa, Wind %.1f kts %s, Gust %.1f kts, Rain %.1f mm\n",
-                hill.temp, hill.temp_min, hill.temp_max, hill.humidity,
-                hill.pressure, hill.wind_kts, hill.wind_dir,
-                hill.wind_gust_kts, hill.rain_today);
+                st.temp, st.temp_min, st.temp_max, st.humidity,
+                st.pressure, st.wind_kts, st.wind_dir,
+                st.wind_gust_kts, st.rain_today);
 
-  hill.valid = !std::isnan(hill.temp);
-  if (hill.valid)
-  {
-    time_t now = time(nullptr);
-    tm tmInfo;
-    localtime_r(&now, &tmInfo);
-    snprintf(hill.last_update, sizeof(hill.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
-  }
-  else
-  {
-    Serial.println("[Scraper] Campania Live: temperature not found");
-  }
-  return hill.valid;
+  st.valid = true;
+  time_t now = time(nullptr);
+  tm tmInfo;
+  localtime_r(&now, &tmInfo);
+  snprintf(st.last_update, sizeof(st.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  hill = st;
+  return true;
 }
 
 // Scrape Lega Navale Torre del Greco (Ecowitt WordPress plugin page)
@@ -207,52 +224,51 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
          && f[F_TEMP].found;
   }
 
-  port.temp = NAN;
-  port.temp_min = NAN;
-  port.temp_max = NAN;
-  port.feels_like = NAN;
-  port.humidity = 0;
-  port.pressure = 0.0f;
-  port.wind_kts = 0.0f;
-  port.wind_gust_kts = 0.0f;
-  port.wind_deg = 0;
-  port.solar_wm2 = 0.0f;
-  port.uv_index = 0;
-  port.rain_today = 0.0f;
-  strlcpy(port.wind_dir, "--", sizeof(port.wind_dir));
+  // Parse into a scratch copy: on failure the last good values are kept.
+  local_station_t st = port;
+  st.temp = st.temp_min = st.temp_max = st.feels_like = NAN;
+  st.humidity = 0;
+  st.pressure = NAN;
+  st.wind_kts = st.wind_gust_kts = 0.0f;
+  st.wind_deg = 0;
+  st.solar_wm2 = 0.0f;
+  st.uv_index = 0;
+  st.rain_today = 0.0f;
+  strlcpy(st.wind_dir, "--", sizeof(st.wind_dir));
 
   float v;
-  if (htmlParseNumber(f[F_TEMP].value, v))  port.temp = v;
-  if (htmlParseNumber(f[F_FEELS].value, v)) port.feels_like = v;
-  if (htmlParseNumber(f[F_WIND].value, v))  port.wind_kts = v;
-  if (htmlParseNumber(f[F_GUST].value, v))  port.wind_gust_kts = v;
-  if (htmlParseNumber(f[F_PRESS].value, v)) port.pressure = v;
-  if (htmlParseNumber(f[F_DEG].value, v))   port.wind_deg = (int)lroundf(v);
-  if (htmlParseNumber(f[F_HUM].value, v))   port.humidity = (int)lroundf(v);
-  if (htmlParseNumber(f[F_SOLAR].value, v)) port.solar_wm2 = v;
-  if (htmlParseNumber(f[F_UV].value, v))    port.uv_index = (int)lroundf(v);
-  if (htmlParseNumber(f[F_RAIN].value, v))  port.rain_today = v;
-  htmlParseWord(f[F_DIR].value, nullptr, port.wind_dir, sizeof(port.wind_dir));
+  if (!ok || !parseRange(f[F_TEMP], -30, 55, st.temp))
+  {
+    Serial.println("[Scraper] Lega Navale: no valid temperature, keeping previous data");
+    return false;
+  }
+  parseRange(f[F_FEELS], -40, 65, st.feels_like);
+  parseRange(f[F_WIND], 0, 150, st.wind_kts);
+  parseRange(f[F_GUST], 0, 200, st.wind_gust_kts);
+  parseRange(f[F_PRESS], 900, 1100, st.pressure);
+  if (parseRange(f[F_DEG], 0, 360, v))  st.wind_deg = (int)lroundf(v) % 360;
+  if (parseRange(f[F_HUM], 0, 100, v))  st.humidity = (int)lroundf(v);
+  parseRange(f[F_SOLAR], 0, 2000, st.solar_wm2);
+  if (parseRange(f[F_UV], 0, 20, v))    st.uv_index = (int)lroundf(v);
+  parseRange(f[F_RAIN], 0, 500, st.rain_today);
+  if (!htmlParseWord(f[F_DIR].value, nullptr, st.wind_dir, sizeof(st.wind_dir)))
+  {
+    strlcpy(st.wind_dir, "--", sizeof(st.wind_dir));
+  }
 
   Serial.printf("[Scraper] Lega Navale: T %.1f C, Hum %d %%, P %.1f hPa, "
                 "Wind %.1f/%.1f kts %s (%d deg), Solar %.1f, UV %d, Rain %.1f mm\n",
-                port.temp, port.humidity, port.pressure, port.wind_kts,
-                port.wind_gust_kts, port.wind_dir, port.wind_deg,
-                port.solar_wm2, port.uv_index, port.rain_today);
+                st.temp, st.humidity, st.pressure, st.wind_kts,
+                st.wind_gust_kts, st.wind_dir, st.wind_deg,
+                st.solar_wm2, st.uv_index, st.rain_today);
 
-  port.valid = !std::isnan(port.temp);
-  if (port.valid)
-  {
-    time_t now = time(nullptr);
-    tm tmInfo;
-    localtime_r(&now, &tmInfo);
-    snprintf(port.last_update, sizeof(port.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
-  }
-  else
-  {
-    Serial.println("[Scraper] Lega Navale: temperature not found");
-  }
-  return port.valid;
+  st.valid = true;
+  time_t now = time(nullptr);
+  tm tmInfo;
+  localtime_r(&now, &tmInfo);
+  snprintf(st.last_update, sizeof(st.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  port = st;
+  return true;
 }
 
 // Populate today's forecast from OWM data
