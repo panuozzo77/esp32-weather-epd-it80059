@@ -87,7 +87,7 @@ const uint8_t AHT20_ADDRESS = 0x38;
 // WIFI
 const char *WIFI_SSID     = SECRET_WIFI_SSID;
 const char *WIFI_PASSWORD = SECRET_WIFI_PASSWORD;
-const unsigned long WIFI_TIMEOUT = 10000; // ms, WiFi connection timeout.
+const unsigned long WIFI_TIMEOUT = 15000; // ms, per connection attempt (2 attempts).
 
 // HTTP
 // The following errors are likely the result of insuffient http client tcp 

@@ -94,6 +94,22 @@ static void logWiFiFailure(wl_status_t status)
   WiFi.scanDelete();
 }
 
+/* Waits up to timeoutMs for the station to connect, printing progress dots.
+ */
+static wl_status_t waitForConnection(unsigned long timeoutMs)
+{
+  unsigned long start = millis();
+  wl_status_t status = WiFi.status();
+  while (status != WL_CONNECTED && millis() - start < timeoutMs)
+  {
+    Serial.print(".");
+    delay(100);
+    status = WiFi.status();
+  }
+  Serial.println();
+  return status;
+}
+
 /* Power-on and connect WiFi.
  * Takes int parameter to store WiFi RSSI, or “Received Signal Strength
  * Indicator"
@@ -113,18 +129,21 @@ wl_status_t startWiFi(int &wifiRSSI)
 
   Serial.printf("%s '%s'", TXT_CONNECTING_TO, WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wl_status_t connection_status = waitForConnection(WIFI_TIMEOUT);
 
-  // timeout if WiFi does not connect in WIFI_TIMEOUT ms from now
-  unsigned long timeout = millis() + WIFI_TIMEOUT;
-  wl_status_t connection_status = WiFi.status();
-
-  while ((connection_status != WL_CONNECTED) && (millis() < timeout))
+  if (connection_status != WL_CONNECTED)
   {
-    Serial.print(".");
-    delay(50);
-    connection_status = WiFi.status();
+    // Routers with band steering or a busy WPA2/WPA3 handshake often refuse
+    // the first attempt and accept the next one. Reset the driver and retry.
+    Serial.printf("[WiFi] Attempt 1 failed (status=%d, reason=%u), retrying\n",
+                  (int)connection_status, lastDisconnectReason);
+    WiFi.disconnect(true);
+    delay(200);
+    WiFi.mode(WIFI_STA);
+    Serial.printf("%s '%s'", TXT_CONNECTING_TO, WIFI_SSID);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    connection_status = waitForConnection(WIFI_TIMEOUT);
   }
-  Serial.println();
 
   if (connection_status == WL_CONNECTED)
   {
