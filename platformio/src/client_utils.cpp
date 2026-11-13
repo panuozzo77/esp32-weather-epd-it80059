@@ -80,12 +80,18 @@ wl_status_t startWiFi(int &wifiRSSI)
     wifiRSSI = WiFi.RSSI(); // get WiFi signal strength now, because the WiFi
                             // will be turned off to save power!
     Serial.println("IP: " + WiFi.localIP().toString() + " Gateway: " + WiFi.gatewayIP().toString());
-    // Configure public DNS (Cloudflare & Google) via lwIP without resetting DHCP routing
-    ip_addr_t dns1, dns2;
-    IP_ADDR4(&dns1, 1, 1, 1, 1);
-    IP_ADDR4(&dns2, 8, 8, 8, 8);
-    dns_setserver(0, &dns1);
-    dns_setserver(1, &dns2);
+    // Keep the DHCP-provided DNS (works on networks that block external DNS),
+    // but fall back to public resolvers if it cannot resolve anything.
+    IPAddress probe;
+    if (!WiFi.hostByName(NTP_SERVER_1, probe))
+    {
+      Serial.println("DHCP DNS failed to resolve, switching to 1.1.1.1 / 8.8.8.8");
+      ip_addr_t dns1, dns2;
+      IP_ADDR4(&dns1, 1, 1, 1, 1);
+      IP_ADDR4(&dns2, 8, 8, 8, 8);
+      dns_setserver(0, &dns1);
+      dns_setserver(1, &dns2);
+    }
   }
   else
   {

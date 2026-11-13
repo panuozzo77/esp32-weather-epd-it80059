@@ -284,8 +284,6 @@ void setup()
       fetchCampaniaLive(client1, rtc_bundle.hill);
     }
 
-    delay(200); // Allow previous socket and lwIP TCP buffers to fully settle
-
     {
       WiFiClient client2;
       fetchLegaNavale(client2, rtc_bundle.port);
