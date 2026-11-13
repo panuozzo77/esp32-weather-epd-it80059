@@ -7,6 +7,15 @@
 #include "scraper_utils.h"
 #include "api_response.h"
 #include "conversions.h"
+#include "html_extract.h"
+
+static const char *SCRAPER_USER_AGENT = "esp32-weather-epd/1.0";
+static const uint16_t SCRAPER_CONNECT_TIMEOUT_MS = 8000;
+static const uint16_t SCRAPER_READ_TIMEOUT_MS    = 10000;
+static const size_t   SCRAPER_MAX_BYTES          = 400 * 1024;
+
+static const char *LEGANAVALE_HOST = "www.leganavaletorredelgreco.it";
+static const char *LEGANAVALE_PATH = "/meteo/";
 
 // Helper: skips non-numeric characters until digit or '-' or '+'
 static bool skipToNumber(Stream &s, unsigned long timeoutMs = 2000)
@@ -282,58 +291,127 @@ bool fetchCampaniaLive(WiFiClient &client, local_station_t &hill)
   return hill.valid;
 }
 
-// Scrape Lega Navale Torre del Greco
-bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
+// Downloads host/path and feeds the body to the extractor until every field
+// has been found (the useful data sits near the top of the page, so most of
+// the download is skipped).
+//
+// HTTP/1.0 is used on purpose: with HTTP/1.1 servers reply with
+// "Transfer-Encoding: chunked" and HTTPClient::getStream() hands back the raw
+// socket, so chunk-size lines would be interleaved with the HTML and could
+// split a marker or corrupt a number.
+static bool fetchFields(const char *host, const char *path, bool https,
+                        HtmlFieldExtractor &extractor)
 {
-  Serial.println("[Scraper] Connecting to Lega Navale (Torre del Greco Pontile)...");
+  WiFiClient       plainClient;
+  WiFiClientSecure secureClient;
+  HTTPClient       http;
 
-  HTTPClient http;
-  http.setConnectTimeout(8000);
-  http.setTimeout(15000);
-  http.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36");
+  http.useHTTP10(true);
+  http.setReuse(false);
+  http.setConnectTimeout(SCRAPER_CONNECT_TIMEOUT_MS);
+  http.setTimeout(SCRAPER_READ_TIMEOUT_MS);
+  http.setUserAgent(SCRAPER_USER_AGENT);
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-  // Attempt standard HTTP on port 80
-  http.begin(client, "www.leganavaletorredelgreco.it", 80, "/meteo/");
-  int httpCode = http.GET();
-
-  bool isHttpsFallback = false;
-  WiFiClientSecure secClient;
-  HTTPClient https;
-
-  // Fallback to HTTPS on port 443 if port 80 times out or is rejected
-  if (httpCode != HTTP_CODE_OK)
+  bool begun;
+  if (https)
   {
-    Serial.printf("[Scraper] Port 80 status: %d (%s). Falling back to HTTPS...\n",
-                  httpCode, http.errorToString(httpCode).c_str());
-    http.end();
-
-    secClient.setInsecure();
-    secClient.setTimeout(15000);
-    https.setConnectTimeout(8000);
-    https.setTimeout(15000);
-    https.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36");
-    https.begin(secClient, "https://www.leganavaletorredelgreco.it/meteo/");
-    httpCode = https.GET();
-    isHttpsFallback = true;
+    // Public weather page, no credentials involved: certificate pinning would
+    // only add a periodic manual update when the site's cert rotates.
+    secureClient.setInsecure();
+    begun = http.begin(secureClient, host, 443, path, true);
   }
-
-  if (httpCode != HTTP_CODE_OK)
+  else
   {
-    Serial.printf("[Scraper] Lega Navale failed with code %d\n", httpCode);
-    if (isHttpsFallback) https.end();
-    else http.end();
-    port.valid = false;
+    begun = http.begin(plainClient, host, 80, path);
+  }
+  if (!begun)
+  {
+    Serial.printf("[Scraper] %s: begin() failed\n", host);
     return false;
   }
 
-  Serial.println("[Scraper] Lega Navale connected (HTTP 200). Parsing stream...");
-  Stream &s = isHttpsFallback ? https.getStream() : http.getStream();
-  s.setTimeout(15000);
+  int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK)
+  {
+    Serial.printf("[Scraper] %s%s (%s): HTTP %d %s\n", host, path,
+                  https ? "https" : "http", httpCode,
+                  httpCode < 0 ? http.errorToString(httpCode).c_str() : "");
+    http.end();
+    return false;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  int remaining = http.getSize(); // -1 when no Content-Length
+  size_t total = 0;
+  unsigned long lastData = millis();
+  char buf[512];
+
+  extractor.reset();
+  while (!extractor.allFound() && total < SCRAPER_MAX_BYTES)
+  {
+    size_t avail = stream->available();
+    if (avail == 0)
+    {
+      if (!stream->connected()) break; // server closed, body complete
+      if (millis() - lastData > SCRAPER_READ_TIMEOUT_MS)
+      {
+        Serial.printf("[Scraper] %s: read timeout after %u bytes\n", host, (unsigned)total);
+        break;
+      }
+      delay(5);
+      continue;
+    }
+    int n = stream->read((uint8_t *)buf, avail < sizeof(buf) ? avail : sizeof(buf));
+    if (n <= 0) continue;
+    extractor.feed(buf, n);
+    total += n;
+    lastData = millis();
+    if (remaining > 0 && (remaining -= n) <= 0) break;
+  }
+
+  Serial.printf("[Scraper] %s: read %u bytes, all fields found: %s\n",
+                host, (unsigned)total, extractor.allFound() ? "yes" : "no");
+  http.end();
+  return true;
+}
+
+// Scrape Lega Navale Torre del Greco (Ecowitt WordPress plugin page)
+bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
+{
+  (void)client;
+  Serial.println("[Scraper] Connecting to Lega Navale (Torre del Greco Pontile)...");
+
+  enum { F_TEMP, F_WIND, F_GUST, F_PRESS, F_DEG, F_DIR, F_HUM, F_FEELS,
+         F_SOLAR, F_UV, F_RAIN, F_COUNT };
+  html_field_t f[F_COUNT] = {};
+  f[F_TEMP]  = { "data-ews-field=\"temperature\"", nullptr };
+  f[F_WIND]  = { "data-ews-field=\"wind_speed\"", nullptr };
+  f[F_GUST]  = { "data-ews-field=\"wind_gust\"", nullptr };
+  f[F_PRESS] = { "data-ews-field=\"pressure\"", nullptr };
+  f[F_DEG]   = { "ews-compass-deg\"", nullptr };
+  f[F_DIR]   = { "ews-compass-cardinal\"", nullptr };
+  f[F_HUM]   = { "Umidit\xC3\xA0 al pontile<", "class=\"ecowitt-value\"" };
+  f[F_FEELS] = { "Percepita (pontile)<", "class=\"ecowitt-value\"" };
+  f[F_SOLAR] = { ">Irradianza solare<", "class=\"ecowitt-value\"" };
+  f[F_UV]    = { ">Indice UV<", "class=\"ecowitt-value\"" };
+  f[F_RAIN]  = { ">Oggi<", "class=\"ecowitt-value\"" };
+  HtmlFieldExtractor extractor(f, F_COUNT);
+
+  // Plain HTTP first (less RAM and time than TLS), then HTTPS.
+  bool ok = fetchFields(LEGANAVALE_HOST, LEGANAVALE_PATH, false, extractor)
+            && f[F_TEMP].found;
+  if (!ok)
+  {
+    Serial.println("[Scraper] Lega Navale: retrying over HTTPS...");
+    ok = fetchFields(LEGANAVALE_HOST, LEGANAVALE_PATH, true, extractor)
+         && f[F_TEMP].found;
+  }
 
   port.temp = NAN;
   port.temp_min = NAN;
   port.temp_max = NAN;
+  port.feels_like = NAN;
   port.humidity = 0;
   port.pressure = 0.0f;
   port.wind_kts = 0.0f;
@@ -344,99 +422,24 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
   port.rain_today = 0.0f;
   strlcpy(port.wind_dir, "--", sizeof(port.wind_dir));
 
-  // 1. Wind speed from Ecowitt strip
-  if (s.find("data-rt=\"wind\">"))
-  {
-    port.wind_kts = readFloatFromStream(s);
-    Serial.printf("[Scraper] Lega Navale Wind: %.1f kts\n", port.wind_kts);
-  }
+  float v;
+  if (htmlParseNumber(f[F_TEMP].value, v))  port.temp = v;
+  if (htmlParseNumber(f[F_FEELS].value, v)) port.feels_like = v;
+  if (htmlParseNumber(f[F_WIND].value, v))  port.wind_kts = v;
+  if (htmlParseNumber(f[F_GUST].value, v))  port.wind_gust_kts = v;
+  if (htmlParseNumber(f[F_PRESS].value, v)) port.pressure = v;
+  if (htmlParseNumber(f[F_DEG].value, v))   port.wind_deg = (int)lroundf(v);
+  if (htmlParseNumber(f[F_HUM].value, v))   port.humidity = (int)lroundf(v);
+  if (htmlParseNumber(f[F_SOLAR].value, v)) port.solar_wm2 = v;
+  if (htmlParseNumber(f[F_UV].value, v))    port.uv_index = (int)lroundf(v);
+  if (htmlParseNumber(f[F_RAIN].value, v))  port.rain_today = v;
+  htmlParseWord(f[F_DIR].value, nullptr, port.wind_dir, sizeof(port.wind_dir));
 
-  // 2. Wind gust
-  if (s.find("data-rt=\"gust\">"))
-  {
-    port.wind_gust_kts = readFloatFromStream(s);
-    Serial.printf("[Scraper] Lega Navale Gust: %.1f kts\n", port.wind_gust_kts);
-  }
-
-  // 3. Temperature at pontile
-  if (s.find("data-rt=\"temp\">"))
-  {
-    port.temp = readFloatFromStream(s);
-    Serial.printf("[Scraper] Lega Navale Temp: %.1f °C\n", port.temp);
-  }
-
-  // 4. Pressure
-  if (s.find("data-rt=\"press\">"))
-  {
-    port.pressure = readFloatFromStream(s);
-    Serial.printf("[Scraper] Lega Navale Press: %.1f hPa\n", port.pressure);
-  }
-
-  // 5. Rain rate (skip instant rate)
-  if (s.find("data-rt=\"rain\">"))
-  {
-    readFloatFromStream(s);
-  }
-
-  // 6. Wind degrees
-  if (s.find("data-rt=\"dir\">"))
-  {
-    port.wind_deg = readIntFromStream(s);
-    Serial.printf("[Scraper] Lega Navale Wind Deg: %d°\n", port.wind_deg);
-  }
-
-  // 7. Wind direction label
-  if (s.find("data-rt=\"dir_label\">"))
-  {
-    readWordFromStream(s, port.wind_dir, sizeof(port.wind_dir));
-    Serial.printf("[Scraper] Lega Navale Wind Dir: %s\n", port.wind_dir);
-  }
-
-  // 8. Humidity al pontile
-  if (s.find("Umidit"))
-  {
-    if (s.find("ecowitt-value\">"))
-    {
-      port.humidity = readIntFromStream(s);
-      Serial.printf("[Scraper] Lega Navale Hum: %d %%\n", port.humidity);
-    }
-  }
-
-  // 9. Solar irradiance
-  if (s.find("Irradianza"))
-  {
-    if (s.find("ecowitt-value\">"))
-    {
-      port.solar_wm2 = readFloatFromStream(s);
-      Serial.printf("[Scraper] Lega Navale Solar: %.1f W/m2\n", port.solar_wm2);
-    }
-  }
-
-  // 10. UV Index
-  if (s.find("Indice UV"))
-  {
-    if (s.find("ecowitt-value\">"))
-    {
-      port.uv_index = readIntFromStream(s);
-      Serial.printf("[Scraper] Lega Navale UV: %d\n", port.uv_index);
-    }
-  }
-
-  // 11. Rain today
-  if (s.find("Pioggia"))
-  {
-    if (s.find("Oggi"))
-    {
-      if (s.find("ecowitt-value\">"))
-      {
-        port.rain_today = readFloatFromStream(s);
-        Serial.printf("[Scraper] Lega Navale Rain: %.1f mm\n", port.rain_today);
-      }
-    }
-  }
-
-  if (isHttpsFallback) https.end();
-  else http.end();
+  Serial.printf("[Scraper] Lega Navale: T %.1f C, Hum %d %%, P %.1f hPa, "
+                "Wind %.1f/%.1f kts %s (%d deg), Solar %.1f, UV %d, Rain %.1f mm\n",
+                port.temp, port.humidity, port.pressure, port.wind_kts,
+                port.wind_gust_kts, port.wind_dir, port.wind_deg,
+                port.solar_wm2, port.uv_index, port.rain_today);
 
   port.valid = !std::isnan(port.temp);
   if (port.valid)
@@ -445,6 +448,10 @@ bool fetchLegaNavale(WiFiClient &client, local_station_t &port)
     tm tmInfo;
     localtime_r(&now, &tmInfo);
     snprintf(port.last_update, sizeof(port.last_update), "%02d:%02d", tmInfo.tm_hour, tmInfo.tm_min);
+  }
+  else
+  {
+    Serial.println("[Scraper] Lega Navale: temperature not found");
   }
   return port.valid;
 }
