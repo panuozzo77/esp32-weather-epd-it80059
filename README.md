@@ -1,43 +1,86 @@
-# ESP32 E-Paper Weather Display
+# esp32-weather-epd-it80059
 
-A low-power weather display using a WiFi-enabled ESP32 microcontroller and an E-Paper display. Weather data is fetched from the OpenWeatherMap API, and an onboard sensor provides indoor temperature and humidity.
+A local weather display for **Torre del Greco** (NA, Italy), built on an ESP32-S3 and a 4.2″ tri-color e-paper panel. The `80059` in the name is the town's postal code (CAP).
 
-This project now supports both the classic **7.5″** panels (800×480) and a new **4.2″ tri-color** layout (400×300). The smaller 4.2″ option offers a **significantly lower cost** while retaining the same rich weather information and similar visual experience thanks to a re-optimized UI layout.
+Generic weather displays show a forecast model's estimate for a grid cell. This one shows what is actually being measured in town: it reads two local weather stations, adds the on-board indoor sensor and the day's OpenWeatherMap forecast, and keeps a history of every reading on the SD card.
+
+The firmware targets the **[NM-EPD-420](https://rockbase.shop/products/nm-epd-420/)** board, and the interface is in Italian.
+
+## What It Does
+
+### Two local weather stations
+
+On every refresh the device collects the latest readings from two stations, which sit at different altitudes and give quite different readings:
+
+| Station | Where | What is read |
+|---|---|---|
+| **Collina** | Hillside, 154 m a.s.l. | Temperature (with daily min/max), feels-like, humidity, pressure, wind, gusts, rain today |
+| **Porto** | The pier, sea level | Temperature, humidity, pressure, wind speed, gusts and direction, rain today, solar radiation, UV index |
+
+
+Each reading uses the station's own observation time. If a station hasn't updated for more than 2 hours, its data is flagged as stale on screen. If a fetch fails, or returns placeholder or out-of-range values, the last good values are kept.
+
+Two other sources complete the picture:
+- **Indoor ("Casa"):** temperature and humidity from the board's AHT20 sensor.
+- **Today's forecast:** conditions, min/max, chance and amount of rain, max wind, sunrise and sunset, from the OpenWeatherMap One Call API.
+
+### Three ad-hoc pages
+
+A short press of the **BOOT** button cycles to the next page. This is instant: it redraws from the data in memory without turning on WiFi.
+
+| Page | Content |
+|---|---|
+| **1 – Dashboard** | Real-time readings from the indoor sensor and both stations, side by side with today's forecast, sunrise and sunset, solar radiation and UV |
+| **2 – History & 24 h trend** | A table of the past 4 days plus today (min/max temperature, rain, strongest gust), and a full-screen 24 h temperature chart with the Porto, Collina and indoor lines |
+| **3 – Nautical** | The Porto (pier) station: wind speed in knots and km/h, gusts, a compass with the wind direction and the Beaufort force, plus temperature, humidity, pressure, solar radiation, UV and rain |
 
 <p float="left">
-  <img src="showcase/assembled-demo-raleigh-front.jpg" />
-  <img src="showcase/assembled-demo-raleigh-side.jpg" width="49%" />
-  <img src="showcase/assembled-demo-raleigh-back.jpg" width="49%" />
-  <img src="showcase/assembled-demo-bottom-cover.jpg" width="49%" />
-  <img src="showcase/assembled-demo-bottom-cover-removed.jpg" width="49%" />
+  <img src="mock_ui/screen0_dashboard.png" width="32%" />
+  <img src="mock_ui/screen1_history.png" width="32%" />
+  <img src="mock_ui/screen2_nautical.png" width="32%" />
 </p>
 
-## Features
+*Layout mockups (400×300, sample data) generated with [`mock_ui/preview_new_screens.py`](mock_ui/preview_new_screens.py). The history page has no header or status bar, so the 24 h chart can use the full width and height of the screen, with the last sync time shown next to the legend.*
 
-- Ultra-low power consumption: ~14μA in sleep, ~83mA during refresh (~15s on 7.5″, ~10s on 4.2″ 3-color).
+### Readings stored on the SD card
 
-- Long battery life: 6-12 months on a 5000mAh battery with 30-minute update frequency.
+Every successful refresh is written to the micro-SD card:
 
-- **Dual display support**: 7.5″ high-resolution or cost-optimized 4.2″ tri-color e-paper.
+- **`/logs/meteo_YYYY_MM.csv`:** one row per refresh (every 20 minutes), one file per month. Columns:
+  ```
+  epoch,date_time,hill_temp,hill_hum,hill_pres,hill_wind,hill_gust,hill_rain,
+  port_temp,port_hum,port_wind,port_gust,port_deg,port_solar,port_uv,in_temp,in_hum
+  ```
+- **`/cache/latest.json`:** the last full state. It is used to redraw immediately after a power loss or reset.
 
-- Customizable display: Supports multiple languages, units, time/date formats, AQI scales, personalization options, and much more.
+The daily history table and the 24 h trend are rebuilt from the CSV log, so they survive reboots. You can also pull the card and analyse the data on a computer.
 
-- Easy recharging: USB-C charging with battery monitoring.
+### Refresh cycle and offline behaviour
 
-The hourly outlook graph (bottom right) shows a line indicating temperature and shaded bars indicating probability of precipitation (or optionally volume of precipitation).
+- The device wakes every **20 minutes**, aligned to the clock. It syncs the time over NTP, fetches both stations and the forecast, logs to SD, redraws, and goes back to deep sleep.
+- A **long press of BOOT** (more than 1.2 s) forces a full refresh.
+- If WiFi is unavailable, the screen keeps showing the cached data with an **OFFLINE** badge instead of an error page.
+- WiFi reconnects straight to the cached access point and channel to keep wake time short, with one retry using a longer timeout.
 
-Here are two (slightly outdated) examples utilizing various configuration options:
+## Quick Start (NM-EPD-420)
 
-<p float="left">
-  <img src="showcase/demo-new-york.jpg" width="49%" />
-  <img src="showcase/demo-london.jpg" width="49%" />
-</p>
+1. Copy [`platformio/include/secrets.h.example`](platformio/include/secrets.h.example) to `platformio/include/secrets.h` and fill in your WiFi SSID and password and your OpenWeatherMap API key. `secrets.h` is git-ignored.
+2. Insert a FAT32-formatted micro-SD card.
+3. Build and flash:
+   ```bash
+   cd platformio
+   pio run -e nm-epd-420 --target upload
+   ```
 
-The NM-EPD-420 working like below:
+The coordinates and timezone are already set for Torre del Greco. To adapt the project to another place you would need to change `LAT`/`LON` in [`config.cpp`](platformio/src/config.cpp) and the local station data sources.
 
-![NM-EPD-420 pcb](showcase/nm-epd-420-pcb.png)
+## Credits
 
-![NM-EPD-420 demo](showcase/nm-epd-420.png)
+This repository is a fork of **[lmarzen/esp32-weather-epd](https://github.com/lmarzen/esp32-weather-epd)**, by way of the RockBase fork that added support for the NM-EPD-420 board. The power management, e-paper drivers, fonts, icons and the original OpenWeatherMap layout all come from upstream and are still in the code.
+
+The sections below are the upstream project's documentation. They still apply to the hardware, wiring, build environment and troubleshooting.
+
+---
 
 ## Contents
 
@@ -227,9 +270,7 @@ PlatformIO for VSCode is used for managing dependencies, code compilation, and u
 
    - Important settings to configure in config.cpp:
 
-     - WiFi credentials (ssid, password).
-
-     - Open Weather Map API key (it's free, see next section for important notes about obtaining an API key).
+     - WiFi credentials and the Open Weather Map API key now live in `secrets.h` (copy `secrets.h.example`; see the [Quick Start](#quick-start-nm-epd-420)). The API key is free; see the next section for important notes about obtaining one.
 
      - Latitude and longitude.
 

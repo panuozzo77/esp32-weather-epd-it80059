@@ -138,78 +138,131 @@ def render_screen0():
     img.save("mock_ui/screen0_dashboard.png")
     print("Generated mock_ui/screen0_dashboard.png")
 
+def _trend_line(draw, x0, y0, x1, y1, color, dash_on=0, dash_off=0, phase=0):
+    """2 px line, optionally dashed, mirroring drawTrendLine() in renderer.cpp."""
+    dx, dy = x1 - x0, y1 - y0
+    steps = max(abs(dx), abs(dy))
+    for k in range(steps + 1):
+        x = x0 + (dx * k) // steps if steps else x0
+        y = y0 + (dy * k) // steps if steps else y0
+        on = True
+        if dash_on > 0:
+            on = (phase % (dash_on + dash_off)) < dash_on
+            if k < steps:
+                phase += 1
+        if on:
+            draw.point([(x, y), (x, y + 1)], fill=color)
+    return phase
+
 def render_screen1():
+    """History page as drawn by drawScreen1_History(): no header or status
+    bar, table on top, full-width 24 h chart with an hour axis."""
     img = Image.new("RGB", (W, H), WHITE)
     draw = ImageDraw.Draw(img)
     fonts = get_fonts()
+    f6, f5 = fonts["small"], fonts["tiny"]
 
-    # Header
-    draw.text((8, 4), "STORICO METEO & TREND 24H", fill=RED, font=fonts["title"])
-    draw.text((8, 20), "Dati aggregati da scheda SD", fill=BLACK, font=fonts["small"])
-    draw.text((W - 100, 12), "Torre del Greco", fill=BLACK, font=fonts["sub"])
-    draw.line([(6, 33), (W - 6, 33)], fill=BLACK, width=1)
-
-    # Table
-    draw.rectangle([6, 37, 394, 55], outline=BLACK)
-    draw.text((12, 41), "Giorno", fill=BLACK, font=fonts["bold_sm"])
-    draw.text((105, 41), "T. Min", fill=BLACK, font=fonts["bold_sm"])
-    draw.text((175, 41), "T. Max", fill=BLACK, font=fonts["bold_sm"])
-    draw.text((250, 41), "Pioggia", fill=BLACK, font=fonts["bold_sm"])
-    draw.text((330, 41), "Raffica", fill=BLACK, font=fonts["bold_sm"])
+    # 1. Table (y = 2 to 107); text y values are baselines, as in the firmware
+    draw.rectangle([6, 2, 393, 19], outline=BLACK)
+    draw.text((12, 15), "Giorno", fill=BLACK, font=f6, anchor="ls")
+    for x, t in ((110, "T. Min"), (180, "T. Max"), (260, "Pioggia"), (345, "Raffica Max")):
+        draw.text((x, 15), t, fill=BLACK, font=f6, anchor="ms")
 
     rows = [
-        ("Oggi (07/11)", "15.2°", "20.1°", "0.0 mm", "11 kts", True),
-        ("Ieri (06/11)", "14.8°", "19.5°", "2.4 mm", "14 kts", False),
-        ("Gio 05/11", "13.9°", "18.7°", "0.0 mm", "8 kts", False),
-        ("Mer 04/11", "14.1°", "19.0°", "0.0 mm", "9 kts", False),
-        ("Mar 03/11", "15.0°", "21.2°", "1.1 mm", "16 kts", False),
+        ("Oggi (07/11)", 13.1, 20.5, 0.0, 11),
+        ("Ieri (06/11)", 14.8, 19.5, 2.4, 14),
+        ("Gio 05/11", 13.9, 18.7, 0.0, 8),
+        ("Mer 04/11", 14.1, 19.0, 0.0, 9),
+        ("Mar 03/11", 15.0, 21.2, 1.1, 16),
     ]
+    row_y = 20
+    for i, (day, tmin, tmax, rain, gust) in enumerate(rows):
+        by = row_y + 12
+        draw.text((12, by), day, fill=RED if i == 0 else BLACK, font=f6, anchor="ls")
+        draw.text((110, by), f"{tmin:.1f}°C", fill=RED, font=f6, anchor="ms")
+        draw.text((180, by), f"{tmax:.1f}°C", fill=BLACK, font=f6, anchor="ms")
+        draw.text((260, by), f"{rain:.1f} mm", fill=RED if rain > 0 else BLACK, font=f6, anchor="ms")
+        draw.text((345, by), f"{gust} kts", fill=BLACK, font=f6, anchor="ms")
+        draw.line([(6, row_y + 17), (394, row_y + 17)], fill=BLACK)
+        row_y += 17
 
-    y = 57
-    for day, tmin, tmax, rain, wind, is_today in rows:
-        draw.line([(6, y + 16), (394, y + 16)], fill=BLACK, width=1)
-        draw.text((12, y + 2), day, fill=RED if is_today else BLACK, font=fonts["small"])
-        draw.text((105, y + 2), tmin, fill=RED, font=fonts["small"])
-        draw.text((175, y + 2), tmax, fill=BLACK, font=fonts["small"])
-        draw.text((250, y + 2), rain, fill=RED if rain != "0.0 mm" else BLACK, font=fonts["small"])
-        draw.text((330, y + 2), wind, fill=BLACK, font=fonts["small"])
-        y += 17
+    # 2. Legend + sync time (the status bar is hidden on this page)
+    leg_y = 121
+    lx = 8
+    draw.text((lx, leg_y), "Temp. 24h", fill=BLACK, font=f6, anchor="ls")
+    lx += 70
+    _trend_line(draw, lx, leg_y - 4, lx + 18, leg_y - 4, BLACK)
+    draw.text((lx + 22, leg_y), "Porto", fill=BLACK, font=f6, anchor="ls")
+    lx += 64
+    _trend_line(draw, lx, leg_y - 4, lx + 18, leg_y - 4, RED)
+    draw.text((lx + 22, leg_y), "Collina", fill=RED, font=f6, anchor="ls")
+    lx += 72
+    _trend_line(draw, lx, leg_y - 4, lx + 18, leg_y - 4, BLACK, 4, 3)
+    draw.text((lx + 22, leg_y), "Casa", fill=BLACK, font=f6, anchor="ls")
+    draw.text((W - 8, leg_y), "Agg. 14:20", fill=BLACK, font=f5, anchor="rs")
 
-    # 24h Graph
-    draw.text((8, 148), "Curva Temp. 24h:", fill=BLACK, font=fonts["bold_sm"])
-    draw.text((130, 148), "- Porto", fill=BLACK, font=fonts["small"])
-    draw.text((190, 148), "- Collina", fill=RED, font=fonts["small"])
-    draw.text((260, 148), "-- Casa", fill=BLACK, font=fonts["small"])
+    # 3. 24 h chart: 72 samples every 20 min, ending at 14:20
+    gx0, gx1, gy0, gy1 = 32, 390, 130, 282
+    end_min = 14 * 60 + 20
+    start_min = end_min - 24 * 60
+    times = [start_min + 20 * (i + 1) for i in range(72)]
 
-    gx0, gy0, gx1, gy1 = 36, 165, 390, 265
-    draw.line([(gx0, gy1), (gx1, gy1)], fill=BLACK, width=1)
-    draw.line([(gx0, gy0), (gx0, gy1)], fill=BLACK, width=1)
+    def diurnal(t, mean, amp, peak_h=14.5):
+        h = (t / 60.0) % 24
+        return mean + amp * math.cos((h - peak_h) / 24.0 * 2 * math.pi)
 
-    draw.text((12, gy0), "22°", fill=BLACK, font=fonts["tiny"])
-    draw.text((12, (gy0+gy1)//2 - 4), "18°", fill=BLACK, font=fonts["tiny"])
-    draw.text((12, gy1 - 8), "14°", fill=BLACK, font=fonts["tiny"])
+    porto = [diurnal(t, 17.6, 2.4) + 0.15 * math.sin(t / 47.0) for t in times]
+    collina = [diurnal(t, 16.8, 3.6, 14.0) + 0.2 * math.sin(t / 31.0) for t in times]
+    casa = [diurnal(t, 20.6, 0.6, 18.0) for t in times]
+    series = [(porto, BLACK, 0, 0), (collina, RED, 0, 0), (casa, BLACK, 4, 3)]
 
-    # Dotted mid line
-    mid_y = (gy0 + gy1) // 2
-    for x in range(gx0, gx1, 6):
-        draw.line([(x, mid_y), (x + 2, mid_y)], fill=BLACK, width=1)
+    vals = porto + collina + casa
+    v_min, v_max = min(vals), max(vals)
+    span = v_max - v_min
+    step = 1 if span <= 5 else 2 if span <= 12 else 5 if span <= 28 else 10
+    g_min = math.floor((v_min - 0.5) / step) * step
+    g_max = math.ceil((v_max + 0.5) / step) * step
 
-    # Simulated curve
-    pts_porto = [18.5, 18.0, 17.2, 16.5, 16.0, 15.8, 15.5, 15.2, 16.0, 17.5, 18.8, 19.5, 20.0, 19.8, 19.2]
-    pts_collina = [18.0, 17.5, 16.8, 16.0, 15.2, 14.8, 14.5, 14.2, 15.0, 16.8, 18.2, 19.2, 19.8, 19.5, 19.0]
-    n = len(pts_porto)
-    step = (gx1 - gx0) / (n - 1)
+    def x_of(t):
+        return gx0 + int((t - start_min) * (gx1 - gx0) / (end_min - start_min))
 
-    def to_y(val):
-        return int(gy1 - ((val - 14.0) / (22.0 - 14.0)) * (gy1 - gy0))
+    def y_of(v):
+        y = gy1 - round((v - g_min) / (g_max - g_min) * (gy1 - gy0))
+        return max(gy0, min(gy1, y))
 
-    for i in range(n - 1):
-        x_a = int(gx0 + i * step)
-        x_b = int(gx0 + (i + 1) * step)
-        draw.line([(x_a, to_y(pts_porto[i])), (x_b, to_y(pts_porto[i+1]))], fill=BLACK, width=2)
-        draw.line([(x_a, to_y(pts_collina[i])), (x_b, to_y(pts_collina[i+1]))], fill=RED, width=2)
+    # Horizontal grid + temperature labels
+    v = g_min
+    while v <= g_max + 0.01:
+        y = y_of(v)
+        draw.text((gx0 - 4, y + 3), f"{v:.0f}°", fill=BLACK, font=f5, anchor="rs")
+        if y != gy1:
+            for x in range(gx0 + 2, gx1, 4):
+                draw.point((x, y), fill=BLACK)
+        v += step
 
-    draw_status_bar(draw, fonts, page=1, is_offline=False)
+    # Vertical grid + hour labels every 3 hours, midnight in red
+    for hm in range((start_min // 60 + 1) * 60, end_min + 1, 60):
+        hour = (hm // 60) % 24
+        if hour % 3:
+            continue
+        x = x_of(hm)
+        for y in range(gy0, gy1, 4):
+            draw.point((x, y), fill=BLACK)
+        draw.line([(x, gy1), (x, gy1 + 3)], fill=BLACK)
+        lbl = f"{hour:02d}:00"
+        lbl_x = min(x, W - 2 - int(draw.textlength(lbl, font=f5)) // 2)
+        draw.text((lbl_x, H - 6), lbl, fill=RED if hour == 0 else BLACK, font=f5, anchor="ms")
+
+    # Axes
+    draw.line([(gx0, gy1), (gx1, gy1)], fill=BLACK)
+    draw.line([(gx0, gy0), (gx0, gy1)], fill=BLACK)
+
+    for data, color, d_on, d_off in series:
+        ph = 0
+        for i in range(1, len(times)):
+            ph = _trend_line(draw, x_of(times[i - 1]), y_of(data[i - 1]),
+                             x_of(times[i]), y_of(data[i]), color, d_on, d_off, ph)
+
     img.save("mock_ui/screen1_history.png")
     print("Generated mock_ui/screen1_history.png")
 
